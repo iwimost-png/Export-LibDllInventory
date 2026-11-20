@@ -1,0 +1,11 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="ManagedCore">
+      <HintPath>bin\ManagedCore.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>
