@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{11111111-AAAA-BBBB-CCCC-000000000001}</ProjectGuid>
+    <RootNamespace>ProductA</RootNamespace>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>include;ext\ThirdParty_v2.4.1\include;CommonLogger\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>lib;ext\ThirdParty_v2.4.1\lib;CommonLogger\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>algocore.lib;netclient.lib;thirdparty_math.lib;ImageEngine.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ProjectReference Include="CommonLogger\CommonLogger.vcxproj">
+      <Project>{A1111111-2222-3333-4444-555555555555}</Project>
+    </ProjectReference>
+  </ItemGroup>
+</Project>
