@@ -236,6 +236,37 @@ namespace ThirdParty {
 Write-TextFile -Path $thirdPartyHeaderPath -Content $thirdPartyHeaderContent
 Write-DummyLib -Path (Join-Path $prodADir 'ThirdParty_v2.4.1\lib\ThirdParty.lib') -LibName 'ThirdParty.lib'
 
+# (d-2) 英字直結フォルダ名にバージョン表記 (Lua5.4.6: 期待抽出値 5.4.6)
+$luaHeaderPath = Join-Path $prodADir 'Lua5.4.6\include\Lua.h'
+$luaHeaderContent = @'
+#pragma once
+namespace Lua {
+    void OpenLibs();
+}
+'@
+Write-TextFile -Path $luaHeaderPath -Content $luaHeaderContent
+Write-DummyLib -Path (Join-Path $prodADir 'Lua5.4.6\lib\Lua.lib') -LibName 'Lua.lib'
+
+# (a-3) 末尾が "ver" のヘッダ名 + "//" 内の "/*" + ネストした "#if 0" ブロック (期待抽出値 2.7.0)
+$serverHeaderPath = Join-Path $prodADir 'include\Server.h'
+$serverHeaderContent = @'
+#pragma once
+// パス例: docs/*.h や /* コメント内スラッシュが後続の有効定義を消さないこと
+#if 0
+#ifdef LEGACY_SERVER_API
+#define SERVER_VERSION "0.1.0-nested-disabled"
+#endif
+#endif
+
+#define SERVER_VERSION "2.7.0"
+
+namespace Server {
+    bool Start();
+}
+'@
+Write-TextFile -Path $serverHeaderPath -Content $serverHeaderContent
+Write-DummyLib -Path (Join-Path $prodADir 'lib\Server.lib') -LibName 'Server.lib'
+
 # ProjectReference 先のサブプロジェクト (SubCore: 期待抽出値 1.1.0)
 $subCoreHeaderPath = Join-Path $prodADir 'SubCore\include\SubCore.h'
 $subCoreHeaderContent = @'
@@ -287,11 +318,11 @@ $prodAVcxprojContent = @'
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)ThirdParty_v2.4.1\include;$(ProjectDir)SubCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)ThirdParty_v2.4.1\include;$(ProjectDir)Lua5.4.6\include;$(ProjectDir)SubCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)ThirdParty_v2.4.1\lib;$(ProjectDir)SubCore\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)ThirdParty_v2.4.1\lib;$(ProjectDir)Lua5.4.6\lib;$(ProjectDir)SubCore\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;Lua.lib;Server.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -318,6 +349,8 @@ $($betaHeaderPath.ToUpperInvariant())
 $($gammaHeaderPath.ToUpperInvariant())
 $($tlogOnlyHeaderPath.ToUpperInvariant())
 $($thirdPartyHeaderPath.ToUpperInvariant())
+$($luaHeaderPath.ToUpperInvariant())
+$($serverHeaderPath.ToUpperInvariant())
 $($subCoreHeaderPath.ToUpperInvariant())
 "@
 Write-TextFile -Path (Join-Path $prodATlogDir 'CL.read.1.tlog') -Content $prodAClTlogContent -Encoding $utf16Le
@@ -331,6 +364,8 @@ $((Join-Path $prodADir 'lib\BetaDesc.lib').ToUpperInvariant())
 $((Join-Path $prodADir 'lib\GammaAsc.lib').ToUpperInvariant())
 $((Join-Path $prodADir 'lib\TlogOnlyLib.lib').ToUpperInvariant())
 $((Join-Path $prodADir 'ThirdParty_v2.4.1\lib\ThirdParty.lib').ToUpperInvariant())
+$((Join-Path $prodADir 'Lua5.4.6\lib\Lua.lib').ToUpperInvariant())
+$((Join-Path $prodADir 'lib\Server.lib').ToUpperInvariant())
 $((Join-Path $prodADir 'SubCore\lib\SubCore.lib').ToUpperInvariant())
 "@
 Write-TextFile -Path (Join-Path $prodATlogDir 'link.read.1.tlog') -Content $prodALinkTlogContent -Encoding $utf16Le
@@ -387,6 +422,56 @@ namespace Epsilon {
 Write-TextFile -Path $epsilonHeaderPath -Content $epsilonHeaderContent
 Write-DummyLib -Path (Join-Path $prodBDir 'lib\EpsilonAmbiguous.lib') -LibName 'EpsilonAmbiguous.lib'
 
+# (c-3) 改訂履歴の全エントリが同一バージョンのパターン（Status: OK / 期待抽出値: 1.0.0）
+$sameVerHeaderPath = Join-Path $prodBDir 'include\SameVerHistory.h'
+$sameVerHeaderContent = @'
+#pragma once
+/*
+ * 改訂履歴
+ * 2024/01/10 Ver 1.0.0 初版リリース
+ * 2024/03/15 Ver 1.0.0 ドキュメントコメント追記
+ */
+namespace SameVer {
+    void Ping();
+}
+'@
+Write-TextFile -Path $sameVerHeaderPath -Content $sameVerHeaderContent
+Write-DummyLib -Path (Join-Path $prodBDir 'lib\SameVerHistory.lib') -LibName 'SameVerHistory.lib'
+
+# (c-4) 日付が一部欠落しつつ日付順序がバージョン順序と矛盾するパターン（要目視確認）
+$partialDateHeaderPath = Join-Path $prodBDir 'include\PartialDateConflict.h'
+$partialDateHeaderContent = @'
+#pragma once
+/*
+ * 改訂履歴
+ * 2025/05/01 Ver 2.0.0 機能追加
+ * Ver 1.9.0 軽微修正 (日付記載なし)
+ * 2025/08/01 Ver 1.8.0 初期統合
+ */
+namespace PartialDate {
+    void Sync();
+}
+'@
+Write-TextFile -Path $partialDateHeaderPath -Content $partialDateHeaderContent
+Write-DummyLib -Path (Join-Path $prodBDir 'lib\PartialDateConflict.lib') -LibName 'PartialDateConflict.lib'
+
+# 同一パッケージ内複数ヘッダ + 別プレフィックス分割 #define 混在確認 (期待抽出値: 1.6.3)
+$multiPkgDir = Join-Path $prodBDir 'MultiHeaderPkg'
+Write-TextFile -Path (Join-Path $multiPkgDir 'include\MultiPkg.h') -Content "#pragma once`nnamespace MultiPkg { void Init(); }`n"
+Write-TextFile -Path (Join-Path $multiPkgDir 'include\MultiPkgTypes.h') -Content "#pragma once`ntypedef int MultiPkgHandle;`n"
+$multiPkgVerHeaderContent = @'
+#pragma once
+#define PROTOCOL_MAJOR 9
+#define MULTIPKG_MAJOR 1
+#define MULTIPKG_MINOR 6
+#define MULTIPKG_PATCH 3
+'@
+Write-TextFile -Path (Join-Path $multiPkgDir 'include\MultiPkgVersion.h') -Content $multiPkgVerHeaderContent
+Write-DummyLib -Path (Join-Path $multiPkgDir 'lib\MultiPkg.lib') -LibName 'MultiPkg.lib'
+
+# 中間ビルドフォルダ (obj/) 内のダミーDLL（抽出対象外となることを確認）
+Write-DummyDllWithoutVersion -Path (Join-Path $prodBDir 'obj\Debug\net48\IntermediateDummy.dll') -DllName 'IntermediateDummy.dll'
+
 # バイナリ情報ありの .NET DLL (期待抽出値: 3.5.1.0)
 $managedCoreDllPath = Join-Path $prodBDir 'bin\ManagedCore.dll'
 Write-BinaryDllWithVersion -Path $managedCoreDllPath -ClassName 'ManagedCore' -FileVersion '3.5.1.0' -ProductVersion '3.5.1'
@@ -435,11 +520,11 @@ $prodBVcxprojContent = @'
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)MultiHeaderPkg\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(ProjectDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)MultiHeaderPkg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;SameVerHistory.lib;PartialDateConflict.lib;MultiPkg.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

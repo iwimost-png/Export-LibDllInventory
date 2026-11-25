@@ -6,9 +6,10 @@
 .DESCRIPTION
     【バージョン抽出の優先順位】
       1. バイナリ情報 (.dll の FileVersion / ProductVersion)
-      2. フォルダ名 (例: ThirdParty_v2.4.1)
-      3. #define (対応する .h ファイル内の有効なマクロ定義。コメントアウトや #if 0 は除外)
-      4. 改訂履歴コメント (.h ファイル内の履歴コメント。昇順・降順を自動判定)
+      2. フォルダ名 (例: ThirdParty_v2.4.1, Lua5.4.6)
+      3. #define (対応するヘッダ / ソースファイル内の有効なマクロ定義。コメントアウトや #if 0 は除外)
+      4. 改訂履歴コメント (対応するヘッダ / ソースファイル内の履歴コメント。昇順・降順を自動判定)
+         ※数値＋英文字表記 (例: 1.420N < 1.425P) に対応し、複数ファイル間で最新のバージョンを採用
          ※昇順・降順が判別できない場合は「先頭: X.X.X / 末尾: Y.Y.Y」を出力し、Status列を「要目視確認」に設定
       5. 更新日時 (対象ファイルの LastWriteTime にフォールバック)
 
@@ -16,7 +17,7 @@
       - .vcxproj (AdditionalDependencies, ProjectReference, Reference, AdditionalIncludeDirectories, AdditionalLibraryDirectories)
       - .csproj (Reference, ProjectReference)
       - link.read.*.tlog / CL.read.*.tlog
-      - 製品フォルダ配下のファイルシステム探索 (.lib / .dll)
+      - 製品フォルダ配下のファイルシステム探索 (.lib / .dll。obj/.vs/.git/TestResults/ipch 等の中間フォルダは除外)
 
 .PARAMETER RootPath
     製品サブフォルダ (ProductA, ProductB 等) を格納したルートフォルダパス。既定値は ./test_env。
@@ -62,6 +63,18 @@ $StandardSystemLibs = [System.Collections.Generic.HashSet[string]]::new([System.
     'libcmt.lib', 'libcmtd.lib', 'vcruntime.lib', 'vcruntimed.lib',
     'ucrt.lib', 'ucrtd.lib', 'msvcprt.lib', 'msvcprtd.lib'
 ) | ForEach-Object { [void]$StandardSystemLibs.Add($_) }
+
+# ファイルシステム走査から除外する中間ビルド・IDE管理フォルダ
+$ExcludedDirRegex = '(?:^|[\\/])(?:obj|\.vs|\.git|TestResults|ipch)(?:[\\/]|$)'
+
+function Test-IsExcludedPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$FullPath,
+        [Parameter(Mandatory = $true)][string]$BaseDir
+    )
+    $rel = Get-NormalizedRelativePath -BasePath $BaseDir -TargetPath $FullPath
+    return ($rel -match $ExcludedDirRegex)
+}
 
 function Get-NormalizedRelativePath {
     param(
@@ -133,32 +146,169 @@ function Read-TextAutoEncoding {
     }
 }
 
-function ConvertTo-VersionTuple {
+function ConvertTo-VersionKey {
+    <#
+    .SYNOPSIS
+        バージョン文字列を比較可能な構造 (数値4要素 + 英文字サフィックス + プレリリース部) に分解します。
+        例: "1.420N" -> Tuple=@(1, 420, 0, 0), AlphaSuffix="N"
+    #>
     param([Parameter(Mandatory = $true)][string]$VersionString)
-    # 数値パート (Major.Minor.Patch.Build) を4要素の整数配列に変換
-    $clean = $VersionString -replace '^[^\d]+', ''
-    $numPart = ($clean -split '[^0-9\.]')[0]
-    $parts = $numPart -split '\.'
+
+    $clean = $VersionString.Trim() -replace '^[^\d]+', ''
     $tuple = @(0, 0, 0, 0)
-    for ($i = 0; $i -lt [Math]::Min($parts.Count, 4); $i++) {
-        $val = 0
-        if ([int]::TryParse($parts[$i], [ref]$val)) {
-            $tuple[$i] = $val
+    $alphaSuffix = ''
+    $preRelease  = ''
+
+    if ($clean -match '^(?<nums>\d+(?:\.\d+){0,3})(?<alpha>[A-Za-z]+)?(?<pre>-[0-9A-Za-z\._]+)?') {
+        $parts = $Matches['nums'] -split '\.'
+        for ($i = 0; $i -lt [Math]::Min($parts.Count, 4); $i++) {
+            $val = 0
+            if ([int]::TryParse($parts[$i], [ref]$val)) {
+                $tuple[$i] = $val
+            }
         }
+        if ($Matches['alpha']) { $alphaSuffix = $Matches['alpha'] }
+        if ($Matches['pre'])   { $preRelease  = $Matches['pre'] }
     }
-    return ,$tuple
+
+    return [PSCustomObject]@{
+        Tuple       = $tuple
+        AlphaSuffix = $alphaSuffix
+        PreRelease  = $preRelease
+    }
 }
 
-function Compare-VersionTuple {
+function Compare-VersionKey {
+    <#
+    .SYNOPSIS
+        2つのバージョンキーを比較します (-1: A < B, 0: A == B, 1: A > B)。
+        数値部 -> 英文字サフィックス (1.420N < 1.420P) -> プレリリース部の順に比較します。
+    #>
     param(
-        [int[]]$TupleA,
-        [int[]]$TupleB
+        [Parameter(Mandatory = $true)]$KeyA,
+        [Parameter(Mandatory = $true)]$KeyB
     )
+
     for ($i = 0; $i -lt 4; $i++) {
-        if ($TupleA[$i] -lt $TupleB[$i]) { return -1 }
-        if ($TupleA[$i] -gt $TupleB[$i]) { return 1 }
+        if ($KeyA.Tuple[$i] -lt $KeyB.Tuple[$i]) { return -1 }
+        if ($KeyA.Tuple[$i] -gt $KeyB.Tuple[$i]) { return 1 }
     }
+
+    $hasAlphaA = -not [string]::IsNullOrEmpty($KeyA.AlphaSuffix)
+    $hasAlphaB = -not [string]::IsNullOrEmpty($KeyB.AlphaSuffix)
+    if (-not $hasAlphaA -and $hasAlphaB) { return -1 }
+    if ($hasAlphaA -and -not $hasAlphaB) { return 1 }
+    if ($hasAlphaA -and $hasAlphaB) {
+        $uA = $KeyA.AlphaSuffix.ToUpperInvariant()
+        $uB = $KeyB.AlphaSuffix.ToUpperInvariant()
+        if ($uA.Length -lt $uB.Length) { return -1 }
+        if ($uA.Length -gt $uB.Length) { return 1 }
+        $cmpAlpha = [string]::CompareOrdinal($uA, $uB)
+        if ($cmpAlpha -ne 0) { return $(if ($cmpAlpha -lt 0) { -1 } else { 1 }) }
+
+        $cmpExact = [string]::CompareOrdinal($KeyA.AlphaSuffix, $KeyB.AlphaSuffix)
+        if ($cmpExact -ne 0) { return $(if ($cmpExact -lt 0) { -1 } else { 1 }) }
+    }
+
+    $hasPreA = -not [string]::IsNullOrEmpty($KeyA.PreRelease)
+    $hasPreB = -not [string]::IsNullOrEmpty($KeyB.PreRelease)
+    if ($hasPreA -and -not $hasPreB) { return -1 }
+    if (-not $hasPreA -and $hasPreB) { return 1 }
+    if ($hasPreA -and $hasPreB) {
+        $cmpPre = [string]::Compare($KeyA.PreRelease, $KeyB.PreRelease, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($cmpPre -ne 0) { return $(if ($cmpPre -lt 0) { -1 } else { 1 }) }
+    }
+
     return 0
+}
+
+function Remove-CppCommentsAndDisabledIf0 {
+    param([Parameter(Mandatory = $true)][string]$SourceText)
+
+    # 1. 文字列リテラル・文字リテラルを保護しつつ // コメントと /* */ コメントを1パスで除去
+    #    (// 行内の /* が誤ってブロックコメントを開始するのを防ぐ)
+    $tokenRegex = '(?s)"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|//(?:\\\r?\n|[^\r\n])*|/\*.*?\*/'
+    $noComments = [regex]::Replace($SourceText, $tokenRegex, {
+        param($m)
+        $val = $m.Value
+        if ($val.StartsWith('//') -or $val.StartsWith('/*')) {
+            return ($val -replace '[^\r\n]', ' ')
+        }
+        return $val
+    })
+
+    # 2. #if 0 ... #endif 無効化ブロックをネスト深さ・#else を考慮して除去
+    $lines = $noComments -split '\r?\n'
+    $keptLines = New-Object System.Collections.Generic.List[string]
+    # 各 #if 階層のアクティブ状態スタック (true = 有効, false = #if 0 等で無効)
+    $ifStack = New-Object System.Collections.Generic.Stack[PSCustomObject]
+
+    function Test-IsCurrentlyActive {
+        param($Stack)
+        foreach ($frame in $Stack) {
+            if (-not $frame.BranchActive) { return $false }
+        }
+        return $true
+    }
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*#\s*if\s+\(?\s*0\s*\)?(?:\s|$)') {
+            $ifStack.Push([PSCustomObject]@{ BranchActive = $false; SeenTrue = $false })
+            continue
+        }
+        elseif ($line -match '^\s*#\s*if(?:def|ndef)?\b') {
+            $ifStack.Push([PSCustomObject]@{ BranchActive = $true; SeenTrue = $true })
+            if (Test-IsCurrentlyActive -Stack $ifStack) {
+                $keptLines.Add($line)
+            }
+            continue
+        }
+        elseif ($line -match '^\s*#\s*elif\b') {
+            if ($ifStack.Count -gt 0) {
+                $top = $ifStack.Peek()
+                if ($top.SeenTrue) {
+                    $top.BranchActive = $false
+                }
+                elseif ($line -match '^\s*#\s*elif\s+\(?\s*0\s*\)?(?:\s|$)') {
+                    $top.BranchActive = $false
+                }
+                else {
+                    $top.BranchActive = $true
+                    $top.SeenTrue = $true
+                }
+            }
+            continue
+        }
+        elseif ($line -match '^\s*#\s*else\b') {
+            if ($ifStack.Count -gt 0) {
+                $top = $ifStack.Peek()
+                if ($top.SeenTrue) {
+                    $top.BranchActive = $false
+                }
+                else {
+                    $top.BranchActive = $true
+                    $top.SeenTrue = $true
+                }
+            }
+            continue
+        }
+        elseif ($line -match '^\s*#\s*endif\b') {
+            $wasActive = Test-IsCurrentlyActive -Stack $ifStack
+            if ($ifStack.Count -gt 0) {
+                [void]$ifStack.Pop()
+            }
+            if ($wasActive) {
+                $keptLines.Add($line)
+            }
+            continue
+        }
+
+        if (Test-IsCurrentlyActive -Stack $ifStack) {
+            $keptLines.Add($line)
+        }
+    }
+
+    return ($keptLines -join "`n")
 }
 
 function Get-BinaryDllVersion {
@@ -171,15 +321,38 @@ function Get-BinaryDllVersion {
         foreach ($candidate in @($vi.FileVersion, $vi.ProductVersion)) {
             if (-not [string]::IsNullOrWhiteSpace($candidate)) {
                 $trimmed = $candidate.Trim()
-                # 0.0.0.0 のような空バージョンは未設定とみなす
-                if ($trimmed -match '(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)' -and $Matches['ver'] -notmatch '^0\.0(?:\.0){0,2}$') {
-                    return [PSCustomObject]@{
-                        Version       = $Matches['ver']
-                        VersionSource = 'バイナリ情報(.dll)'
-                        Status        = 'OK'
-                        Notes         = "DLLメタデータ (FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion))"
+                # ドット区切り (1.8.2.0) またはネイティブRCのカンマ区切り ("1, 8, 2, 0") の両方を抽出
+                if ($trimmed -match '(?<ver>\d+(?:\s*[\.,]\s*\d+){1,3}(?:-[0-9A-Za-z\.]+)?)') {
+                    $normVer = ($Matches['ver'] -replace '\s*,\s*', '.').Trim()
+                    if ($normVer -notmatch '^0(?:\.0){1,3}$') {
+                        return [PSCustomObject]@{
+                            Version       = $normVer
+                            VersionSource = 'バイナリ情報(.dll)'
+                            Status        = 'OK'
+                            Notes         = "DLLメタデータ (FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion))"
+                        }
                     }
                 }
+            }
+        }
+
+        # 文字列表記が空でも数値パートが設定されている場合へのフォールバック
+        if ($vi.FileMajorPart -gt 0 -or $vi.FileMinorPart -gt 0 -or $vi.FileBuildPart -gt 0 -or $vi.FilePrivatePart -gt 0) {
+            $numVer = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
+            return [PSCustomObject]@{
+                Version       = $numVer
+                VersionSource = 'バイナリ情報(.dll)'
+                Status        = 'OK'
+                Notes         = "DLLメタデータ数値部 (FileVersionPart: $numVer)"
+            }
+        }
+        if ($vi.ProductMajorPart -gt 0 -or $vi.ProductMinorPart -gt 0 -or $vi.ProductBuildPart -gt 0 -or $vi.ProductPrivatePart -gt 0) {
+            $numVer = "$($vi.ProductMajorPart).$($vi.ProductMinorPart).$($vi.ProductBuildPart).$($vi.ProductPrivatePart)"
+            return [PSCustomObject]@{
+                Version       = $numVer
+                VersionSource = 'バイナリ情報(.dll)'
+                Status        = 'OK'
+                Notes         = "DLLメタデータ数値部 (ProductVersionPart: $numVer)"
             }
         }
     }
@@ -191,25 +364,53 @@ function Get-BinaryDllVersion {
 
 function Get-FolderVersion {
     param(
-        [Parameter(Mandatory = $true)][string[]]$TargetPaths,
-        [Parameter(Mandatory = $true)][string]$ProductDir
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$TargetPaths,
+        [Parameter(Mandatory = $true)][string]$ProductDir,
+        [string]$RootDir
     )
     $productFull = [System.IO.Path]::GetFullPath($ProductDir).TrimEnd('\', '/')
+    $rootFull    = if (-not [string]::IsNullOrWhiteSpace($RootDir)) {
+        [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\', '/')
+    } else { $productFull }
+
     # TargetFramework名などはフォルダバージョン表記から除外
     $ignoreDirRegex = '^(?i)(?:x64|x86|win32|win64|arm64|debug|release|bin|lib|include|src|obj|net\d+(?:\.\d+)?|netstandard\d+\.\d+|netcoreapp\d+\.\d+|.*\.tlog)$'
 
     foreach ($tPath in $TargetPaths) {
         if ([string]::IsNullOrWhiteSpace($tPath)) { continue }
-        $currentDir = Split-Path -Path ([System.IO.Path]::GetFullPath($tPath)) -Parent
+        $fullTPath = [System.IO.Path]::GetFullPath($tPath)
+        $currentDir = Split-Path -Path $fullTPath -Parent
 
-        while (-not [string]::IsNullOrWhiteSpace($currentDir) -and
-               $currentDir.Length -gt $productFull.Length -and
-               $currentDir.StartsWith($productFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        # 走査上限を決定:
+        # 1) 製品フォルダ内なら製品フォルダの手前まで
+        # 2) 製品フォルダ外かつ RootDir 内なら RootDir の手前まで (例: ..\Shared\OpenSSL_v3.1.4)
+        # 3) RootDir 外なら親ディレクトリ最大3階層まで
+        $isInsideProduct = $fullTPath.StartsWith($productFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+        $isInsideRoot    = $fullTPath.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+        $maxExternalDepth = 3
+        $depth = 0
+
+        while (-not [string]::IsNullOrWhiteSpace($currentDir)) {
+            if ($isInsideProduct) {
+                if ($currentDir.Length -le $productFull.Length -or -not $currentDir.StartsWith($productFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    break
+                }
+            }
+            elseif ($isInsideRoot) {
+                if ($currentDir.Length -le $rootFull.Length -or -not $currentDir.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    break
+                }
+            }
+            else {
+                if ($depth -ge $maxExternalDepth) { break }
+                $depth++
+            }
 
             $dirName = Split-Path -Path $currentDir -Leaf
-            if ($dirName -notmatch $ignoreDirRegex) {
-                # パターン1: ドット区切りバージョン (例: ThirdParty_v2.4.1, Sdk-1.2.3-rc1, Ver2.0.5)
-                if ($dirName -match '(?i)(?:^|[_\-\.\s]|ver|version|v)(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)(?:$|[_\-\s])') {
+            if (-not [string]::IsNullOrWhiteSpace($dirName) -and $dirName -notmatch $ignoreDirRegex) {
+                # パターン1: ドット区切りバージョン (例: ThirdParty_v2.4.1, Lua5.4.6, Sdk-1.2.3-rc1, Ver2.0.5)
+                # ※ (?<!\d\.) により Lua5.4.6 の途中の ".4.6" へ誤マッチすることを防止
+                if ($dirName -match '(?i)(?:^|[_\-\.\s]|ver|version|v|(?<=[A-Za-z]))(?<!\d\.)(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)(?:$|[_\-\s])') {
                     return [PSCustomObject]@{
                         Version       = $Matches['ver']
                         VersionSource = 'フォルダ名'
@@ -217,8 +418,8 @@ function Get-FolderVersion {
                         Notes         = "フォルダ名 '$dirName' から抽出"
                     }
                 }
-                # パターン2: アンダースコア区切りバージョン (例: boost_1_82_0, Lib_v2_4_1)
-                if ($dirName -match '(?i)(?:^|[_\-\s])v?(?<ver>\d+_\d+_\d+(?:_\d+)?)(?:$|[_\-\s])') {
+                # パターン2: アンダースコア区切りバージョン (例: boost_1_82_0, boost1_82_0, Lib_v2_4_1)
+                if ($dirName -match '(?i)(?:^|[_\-\s]|(?<=[A-Za-z]))(?<!\d_)v?(?<ver>\d+_\d+_\d+(?:_\d+)?)(?:$|[_\-\s])') {
                     $verDot = $Matches['ver'] -replace '_', '.'
                     return [PSCustomObject]@{
                         Version       = $verDot
@@ -241,13 +442,7 @@ function Get-HeaderDefineVersion {
     }
     $rawContent = Read-TextAutoEncoding -FilePath $HeaderPath
     $headerLeaf = Split-Path -Path $HeaderPath -Leaf
-
-    # 1. ブロックコメント /* ... */ を除去
-    $cleaned = [regex]::Replace($rawContent, '(?s)/\*.*?\*/', '')
-    # 2. 単一行コメント // ... を除去
-    $cleaned = [regex]::Replace($cleaned, '(?m)//.*$', '')
-    # 3. #if 0 ... #endif 無効化ブロックを除去
-    $cleaned = [regex]::Replace($cleaned, '(?ms)^\s*#\s*if\s+0\b.*?^\s*#\s*endif\b', '')
+    $cleaned    = Remove-CppCommentsAndDisabledIf0 -SourceText $rawContent
 
     # パターンA: 単一マクロによるバージョン文字列/数値定義 (例: #define ALPHA_VERSION "1.4.2")
     $singleRegex = '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*(?:VER|VERSION|RELEASE)[A-Za-z0-9_]*)\s+["'']?v?(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\._]+)?)["'']?(?:\s|$)'
@@ -257,24 +452,31 @@ function Get-HeaderDefineVersion {
             Version       = $mSingle.Groups['ver'].Value
             VersionSource = '#define'
             Status        = 'OK'
+            HeaderPath    = $HeaderPath
             Notes         = "#define $($mSingle.Groups['macro'].Value) ($headerLeaf)"
         }
     }
 
-    # パターンB: MAJOR / MINOR / (PATCH|BUILD|REVISION) 分割マクロ定義
-    $mMajor = [regex]::Match($cleaned, '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*_MAJOR)\s+\(?(?<val>\d+)\)?\b')
-    $mMinor = [regex]::Match($cleaned, '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*_MINOR)\s+\(?(?<val>\d+)\)?\b')
-    if ($mMajor.Success -and $mMinor.Success) {
-        $verStr = "$($mMajor.Groups['val'].Value).$($mMinor.Groups['val'].Value)"
-        $mPatch = [regex]::Match($cleaned, '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*_(?:PATCH|BUILD|REVISION|MICRO))\s+\(?(?<val>\d+)\)?\b')
-        if ($mPatch.Success) {
-            $verStr += ".$($mPatch.Groups['val'].Value)"
-        }
-        return [PSCustomObject]@{
-            Version       = $verStr
-            VersionSource = '#define'
-            Status        = 'OK'
-            Notes         = "#define $($mMajor.Groups['macro'].Value) 他 ($headerLeaf)"
+    # パターンB: MAJOR / MINOR / (PATCH|BUILD|REVISION|MICRO|SUBMINOR) 分割マクロ定義
+    # 同一プレフィックスを持つマクロ群同士のみを結合する
+    $majorMatches = [regex]::Matches($cleaned, '(?im)^\s*#\s*define\s+(?<prefix>[A-Za-z_][A-Za-z0-9_]*)_MAJOR\s+\(?(?<val>\d+)\)?\b')
+    foreach ($mMajor in $majorMatches) {
+        $prefix = $mMajor.Groups['prefix'].Value
+        $escapedPrefix = [regex]::Escape($prefix)
+        $mMinor = [regex]::Match($cleaned, "(?im)^\s*#\s*define\s+${escapedPrefix}_MINOR\s+\(?(?<val>\d+)\)?\b")
+        if ($mMinor.Success) {
+            $verStr = "$($mMajor.Groups['val'].Value).$($mMinor.Groups['val'].Value)"
+            $mPatch = [regex]::Match($cleaned, "(?im)^\s*#\s*define\s+${escapedPrefix}_(?:PATCH|BUILD|REVISION|MICRO|SUBMINOR)\s+\(?(?<val>\d+)\)?\b")
+            if ($mPatch.Success) {
+                $verStr += ".$($mPatch.Groups['val'].Value)"
+            }
+            return [PSCustomObject]@{
+                Version       = $verStr
+                VersionSource = '#define'
+                Status        = 'OK'
+                HeaderPath    = $HeaderPath
+                Notes         = "#define ${prefix}_MAJOR 他 ($headerLeaf)"
+            }
         }
     }
 
@@ -289,57 +491,83 @@ function Get-HeaderHistoryVersion {
     $rawContent = Read-TextAutoEncoding -FilePath $HeaderPath
     $headerLeaf = Split-Path -Path $HeaderPath -Leaf
 
-    # コメント部分のみを先頭から順序を保って抽出
-    $commentMatches = [regex]::Matches($rawContent, '(?s)/\*.*?\*/|(?m)^\s*//.*$')
-    if ($commentMatches.Count -eq 0) {
+    # 文字列リテラルをスキップしつつ、連続するコメントブロック単位で抽出
+    $tokenRegex = '(?s)"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|(?://(?:\\\r?\n|[^\r\n])*(?:\r?\n\s*//(?:\\\r?\n|[^\r\n])*)*)|/\*.*?\*/'
+    $tokenMatches = [regex]::Matches($rawContent, $tokenRegex)
+
+    $commentBlocks = New-Object System.Collections.Generic.List[string]
+    foreach ($tm in $tokenMatches) {
+        if ($tm.Value.StartsWith('//') -or $tm.Value.StartsWith('/*')) {
+            $commentBlocks.Add($tm.Value)
+        }
+    }
+    if ($commentBlocks.Count -eq 0) {
         return $null
     }
 
-    $commentLines = New-Object System.Collections.Generic.List[string]
-    foreach ($cm in $commentMatches) {
-        foreach ($line in ($cm.Value -split '\r?\n')) {
-            $commentLines.Add($line)
-        }
-    }
-
-    # 改訂履歴のエントリー行を抽出
-    $entries = New-Object System.Collections.Generic.List[PSCustomObject]
     $datePattern = '(?<date>(?:19|20)\d{2}[/\-\.](?:0?[1-9]|1[0-2])[/\-\.](?:0?[1-9]|[12]\d|3[01]))'
-    $verWithPrefixPattern = '(?:Ver\.?|Version|v|V|Rev\.?|版)\s*:?\s*(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)\b'
+    $verWithPrefixPattern = '(?:(?:^|[^A-Za-z0-9_])(?:Ver\.?|Version|Rev\.?|v|V)|版)\s*:?\s*(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)\b'
     $verBarePattern = '\b(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)\b'
+    $historyKeywordPattern = '(?i)(?:改訂|変更|更新|履歴|History|Change\s*Log|Changelog|Revision)'
 
-    foreach ($line in $commentLines) {
-        $hasDate = $line -match $datePattern
-        $parsedDate = $null
-        if ($hasDate) {
-            $rawDateStr = ($Matches['date'] -replace '\.', '/')
-            $dtTemp = [datetime]::MinValue
-            if ([datetime]::TryParse($rawDateStr, [ref]$dtTemp)) {
-                $parsedDate = $dtTemp
+    function Parse-HistoryEntriesFromText {
+        param([string]$BlockText)
+        $list = New-Object System.Collections.Generic.List[PSCustomObject]
+        foreach ($line in ($BlockText -split '\r?\n')) {
+            $hasDate = $line -match $datePattern
+            $parsedDate = $null
+            if ($hasDate) {
+                $rawDateStr = ($Matches['date'] -replace '\.', '/')
+                $dtTemp = [datetime]::MinValue
+                if ([datetime]::TryParse($rawDateStr, [ref]$dtTemp)) {
+                    $parsedDate = $dtTemp
+                }
             }
-        }
 
-        $extractedVer = $null
-        if ($line -match $verWithPrefixPattern) {
-            $extractedVer = $Matches['ver']
-        }
-        elseif ($hasDate) {
-            # 日付と同じ行にあるバージョン番号（日付自体を誤抽出しないよう日付部分を除去してから検索）
-            $lineWithoutDate = $line -replace $datePattern, ''
-            if ($lineWithoutDate -match $verBarePattern) {
+            $extractedVer = $null
+            if ($line -match $verWithPrefixPattern) {
                 $extractedVer = $Matches['ver']
             }
-        }
+            elseif ($hasDate) {
+                $lineWithoutDate = $line -replace $datePattern, ''
+                if ($lineWithoutDate -match $verBarePattern) {
+                    $extractedVer = $Matches['ver']
+                }
+            }
 
-        if ($null -ne $extractedVer) {
-            $entries.Add([PSCustomObject]@{
-                RawVersion   = $extractedVer
-                VersionTuple = (ConvertTo-VersionTuple -VersionString $extractedVer)
-                Date         = $parsedDate
-                Line         = $line.Trim()
-            })
+            if ($null -ne $extractedVer) {
+                $list.Add([PSCustomObject]@{
+                    RawVersion   = $extractedVer
+                    VersionTuple = (ConvertTo-VersionTuple -VersionString $extractedVer)
+                    Date         = $parsedDate
+                    Line         = $line.Trim()
+                })
+            }
+        }
+        return $list
+    }
+
+    # ブロック単位で履歴を解析し、専用履歴ブロック（2件以上、または履歴キーワード付き）を優先選択
+    # これによりファイル後半の関数コメント ("// Added in v1.0") との混在を防止する
+    $bestBlockEntries = $null
+    $bestBlockScore   = -1
+    $allEntries       = New-Object System.Collections.Generic.List[PSCustomObject]
+
+    foreach ($blk in $commentBlocks) {
+        $blkEntries = @(Parse-HistoryEntriesFromText -BlockText $blk)
+        foreach ($e in $blkEntries) {
+            $allEntries.Add($e)
+        }
+        if ($blkEntries.Count -ge 2 -or ($blkEntries.Count -ge 1 -and $blk -match $historyKeywordPattern)) {
+            $score = $blkEntries.Count * 10 + $(if ($blk -match $historyKeywordPattern) { 5 } else { 0 })
+            if ($score -gt $bestBlockScore) {
+                $bestBlockScore   = $score
+                $bestBlockEntries = $blkEntries
+            }
         }
     }
+
+    $entries = @(if ($null -ne $bestBlockEntries) { $bestBlockEntries } else { $allEntries })
 
     if ($entries.Count -eq 0) {
         return $null
@@ -349,6 +577,7 @@ function Get-HeaderHistoryVersion {
             Version       = $entries[0].RawVersion
             VersionSource = '改訂履歴コメント'
             Status        = 'OK'
+            HeaderPath    = $HeaderPath
             Notes         = "改訂履歴1件のみ ($headerLeaf)"
         }
     }
@@ -357,11 +586,6 @@ function Get-HeaderHistoryVersion {
     $verNonDecreasing = $true
     $verNonIncreasing = $true
     $verHasStrictDiff = $false
-
-    $allHaveDates = @($entries | Where-Object { $null -eq $_.Date }).Count -eq 0
-    $dateNonDecreasing = $true
-    $dateNonIncreasing = $true
-    $dateHasStrictDiff = $false
 
     for ($i = 0; $i -lt ($entries.Count - 1); $i++) {
         $cmpVer = Compare-VersionTuple -TupleA $entries[$i].VersionTuple -TupleB $entries[$i + 1].VersionTuple
@@ -373,13 +597,22 @@ function Get-HeaderHistoryVersion {
             $verNonDecreasing = $false
             $verHasStrictDiff = $true
         }
+    }
 
-        if ($allHaveDates) {
-            if ($entries[$i].Date -lt $entries[$i + 1].Date) {
+    # 日付のある行（一部欠落を含む）同士で日付順序の単調性を判定
+    $datedEntries = @($entries | Where-Object { $null -ne $_.Date })
+    $hasEnoughDates    = $datedEntries.Count -ge 2
+    $dateNonDecreasing = $true
+    $dateNonIncreasing = $true
+    $dateHasStrictDiff = $false
+
+    if ($hasEnoughDates) {
+        for ($i = 0; $i -lt ($datedEntries.Count - 1); $i++) {
+            if ($datedEntries[$i].Date -lt $datedEntries[$i + 1].Date) {
                 $dateNonIncreasing = $false
                 $dateHasStrictDiff = $true
             }
-            elseif ($entries[$i].Date -gt $entries[$i + 1].Date) {
+            elseif ($datedEntries[$i].Date -gt $datedEntries[$i + 1].Date) {
                 $dateNonDecreasing = $false
                 $dateHasStrictDiff = $true
             }
@@ -390,26 +623,40 @@ function Get-HeaderHistoryVersion {
     $verIsDesc = $verNonIncreasing -and $verHasStrictDiff
     $verAllEq  = $verNonDecreasing -and $verNonIncreasing
 
-    $dateIsAsc  = $allHaveDates -and $dateNonDecreasing -and $dateHasStrictDiff
-    $dateIsDesc = $allHaveDates -and $dateNonIncreasing -and $dateHasStrictDiff
-    $dateAllEq  = $allHaveDates -and $dateNonDecreasing -and $dateNonIncreasing
-
-    # 判定ルール:
-    # - バージョンが単調増加、かつ日付が無い/単調増加/同一 → 昇順（下が最新）
-    # - バージョンが単調減少、かつ日付が無い/単調減少/同一 → 降順（上が最新）
-    # - バージョンが全て同一で日付が単調増加 or 単調減少 → 日付の向きに従う
-    # - 上記以外（バージョンや日付が非単調、または日付の向きとバージョンの向きが矛盾）→ 判別不能（要目視確認）
-    $isAscending = ($verIsAsc -and (-not $allHaveDates -or $dateIsAsc -or $dateAllEq)) -or ($verAllEq -and $dateIsAsc)
-    $isDescending = ($verIsDesc -and (-not $allHaveDates -or $dateIsDesc -or $dateAllEq)) -or ($verAllEq -and $dateIsDesc)
+    $dateIsAsc      = $hasEnoughDates -and $dateNonDecreasing -and $dateHasStrictDiff
+    $dateIsDesc     = $hasEnoughDates -and $dateNonIncreasing -and $dateHasStrictDiff
+    $dateAllEq      = $hasEnoughDates -and $dateNonDecreasing -and $dateNonIncreasing
+    $dateConflict   = $hasEnoughDates -and (-not $dateNonDecreasing) -and (-not $dateNonIncreasing)
 
     $firstVer = $entries[0].RawVersion
     $lastVer  = $entries[$entries.Count - 1].RawVersion
+
+    # 日付とバージョンが矛盾しないか、全行同一かを判定
+    if ($dateConflict) {
+        $isAscending  = $false
+        $isDescending = $false
+    }
+    elseif ($verAllEq) {
+        # 全履歴行のバージョンが同一の場合（日付矛盾もなければ一意に確定）
+        return [PSCustomObject]@{
+            Version       = $firstVer
+            VersionSource = '改訂履歴コメント'
+            Status        = 'OK'
+            HeaderPath    = $HeaderPath
+            Notes         = "改訂履歴内のバージョンがすべて同一 (全$($entries.Count)件: $firstVer) [$headerLeaf]"
+        }
+    }
+    else {
+        $isAscending  = $verIsAsc  -and (-not $hasEnoughDates -or $dateIsAsc  -or $dateAllEq)
+        $isDescending = $verIsDesc -and (-not $hasEnoughDates -or $dateIsDesc -or $dateAllEq)
+    }
 
     if ($isDescending -and -not $isAscending) {
         return [PSCustomObject]@{
             Version       = $firstVer
             VersionSource = '改訂履歴コメント(降順)'
             Status        = 'OK'
+            HeaderPath    = $HeaderPath
             Notes         = "改訂履歴先頭を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$headerLeaf]"
         }
     }
@@ -418,6 +665,7 @@ function Get-HeaderHistoryVersion {
             Version       = $lastVer
             VersionSource = '改訂履歴コメント(昇順)'
             Status        = 'OK'
+            HeaderPath    = $HeaderPath
             Notes         = "改訂履歴末尾を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$headerLeaf]"
         }
     }
@@ -426,63 +674,170 @@ function Get-HeaderHistoryVersion {
             Version       = "先頭: $firstVer / 末尾: $lastVer"
             VersionSource = '改訂履歴コメント(順序不明)'
             Status        = '要目視確認'
+            HeaderPath    = $HeaderPath
             Notes         = "履歴の昇順・降順が判別不能なため先頭と末尾を併記 (全$($entries.Count)件) [$headerLeaf]"
         }
     }
 }
 
-function Find-AssociatedHeader {
+function Find-AssociatedHeaders {
     param(
         [Parameter(Mandatory = $true)][string]$DepFileName,
         [string]$DepFullPath,
-        [string[]]$TlogHeaders,
-        [string[]]$IncludeDirHeaders,
-        [string[]]$AllProductHeaders
+        [AllowEmptyCollection()][string[]]$TlogHeaders = @(),
+        [AllowEmptyCollection()][string[]]$IncludeDirHeaders = @(),
+        [AllowEmptyCollection()][string[]]$AllProductHeaders = @()
     )
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($DepFileName)
     $normName = $baseName -ireplace '^lib(?=[A-Za-z])', ''
     $normName = $normName -ireplace '(?:_d|_debug|_release|_x64|_x86|_static|_dll)$', ''
 
+    $results = New-Object System.Collections.Generic.List[string]
+    $seen    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-Candidate {
+        param([string]$PathToAdd)
+        if (-not [string]::IsNullOrWhiteSpace($PathToAdd) -and $seen.Add($PathToAdd)) {
+            $results.Add($PathToAdd)
+        }
+    }
+
     $pools = @($TlogHeaders, $IncludeDirHeaders, $AllProductHeaders)
 
-    # 1. Exact stem match
+    # 1. Exact stem match (例: Foo.lib -> Foo.h)
     foreach ($pool in $pools) {
         foreach ($hPath in $pool) {
             if ([string]::IsNullOrWhiteSpace($hPath)) { continue }
             $hStem = [System.IO.Path]::GetFileNameWithoutExtension($hPath)
             if ($hStem -ieq $baseName) {
-                return $hPath
+                Add-Candidate -PathToAdd $hPath
             }
         }
     }
 
-    # 2. Normalized stem match
+    # 2. Normalized stem match (例: Foo.lib -> Foo_version.h, FooVersion.h)
+    #    ※ Server.h や DeltaNoVer.h を誤って削らないよう区切り文字付き、または大文字始まりの Version のみ除去
     foreach ($pool in $pools) {
         foreach ($hPath in $pool) {
             if ([string]::IsNullOrWhiteSpace($hPath)) { continue }
             $hStem = [System.IO.Path]::GetFileNameWithoutExtension($hPath)
-            $hNorm = $hStem -ireplace '(?:_version|_ver|version|ver)$', ''
-            if ($hStem -ieq $normName -or $hNorm -ieq $normName) {
-                return $hPath
+            $hNorm = [regex]::Replace($hStem, '(?:(?i)[_-](?:version|ver)$|(?-i:Version)$)', '')
+            if ($hStem -ieq $normName -or (-not [string]::IsNullOrWhiteSpace($hNorm) -and $hNorm -ieq $normName)) {
+                Add-Candidate -PathToAdd $hPath
             }
         }
     }
 
     # 3. 同一パッケージディレクトリ配下の include/*.h マッチ
+    #    (1ファイルのみの場合はそのヘッダ、複数ある場合は *version*.h / *ver*.h を優先追加)
     if (-not [string]::IsNullOrWhiteSpace($DepFullPath) -and (Test-Path -LiteralPath $DepFullPath)) {
         $libDir = Split-Path -Path $DepFullPath -Parent
         $pkgDir = Split-Path -Path $libDir -Parent
         if (-not [string]::IsNullOrWhiteSpace($pkgDir)) {
             $siblingInc = Join-Path $pkgDir 'include'
             if (Test-Path -LiteralPath $siblingInc) {
-                $candidates = @(Get-ChildItem -LiteralPath $siblingInc -Filter '*.h*' -File -Recurse)
+                $candidates = @(Get-ChildItem -LiteralPath $siblingInc -File -Recurse | Where-Object { $_.Extension -imatch '^\.h(?:pp|xx)?$' })
                 if ($candidates.Count -eq 1) {
-                    return $candidates[0].FullName
+                    Add-Candidate -PathToAdd $candidates[0].FullName
+                }
+                elseif ($candidates.Count -gt 1) {
+                    foreach ($c in ($candidates | Where-Object { $_.BaseName -imatch '(?:^|[_-])(?:version|ver)$|(?-i:Version)' } | Sort-Object Name)) {
+                        Add-Candidate -PathToAdd $c.FullName
+                    }
                 }
             }
         }
     }
 
+    return $results.ToArray()
+}
+
+function Register-DependencyItem {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$DepMap,
+        [Parameter(Mandatory = $true)][hashtable]$OnDiskPathMap,
+        [Parameter(Mandatory = $true)][System.Collections.Generic.HashSet[string]]$StandardSystemLibs,
+        [Parameter(Mandatory = $true)][bool]$IncludeSystemLibs,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [string]$ResolvedPath,
+        [Parameter(Mandatory = $true)][string]$SourceTag,
+        [string]$ProjectName
+    )
+    $ext = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
+    if ($ext -ne '.lib' -and $ext -ne '.dll') {
+        return
+    }
+    if (-not $IncludeSystemLibs -and $StandardSystemLibs.Contains($FileName)) {
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ResolvedPath) -and $OnDiskPathMap.ContainsKey($ResolvedPath)) {
+        $ResolvedPath = $OnDiskPathMap[$ResolvedPath]
+        $FileName     = Split-Path -Path $ResolvedPath -Leaf
+    }
+
+    $hasResolvedFile = (-not [string]::IsNullOrWhiteSpace($ResolvedPath) -and (Test-Path -LiteralPath $ResolvedPath -PathType Leaf))
+    $key = if ($hasResolvedFile) {
+        [System.IO.Path]::GetFullPath($ResolvedPath).ToLowerInvariant()
+    }
+    else {
+        "unresolved::$($FileName.ToLowerInvariant())"
+    }
+
+    $unresolvedKey = "unresolved::$($FileName.ToLowerInvariant())"
+
+    if (-not $DepMap.ContainsKey($key)) {
+        $DepMap[$key] = [PSCustomObject]@{
+            FileName = $FileName
+            FileType = $ext
+            FullPath = if ($hasResolvedFile) { [System.IO.Path]::GetFullPath($ResolvedPath) } else { $null }
+            Sources  = New-Object System.Collections.Generic.List[string]
+            Projects = New-Object System.Collections.Generic.List[string]
+        }
+    }
+
+    # 先に未解決キーで登録されていた場合は実ファイル解決エントリへ統合する
+    if ($hasResolvedFile -and $DepMap.ContainsKey($unresolvedKey)) {
+        $oldEntry = $DepMap[$unresolvedKey]
+        foreach ($s in $oldEntry.Sources) {
+            if (-not $DepMap[$key].Sources.Contains($s)) { $DepMap[$key].Sources.Add($s) }
+        }
+        foreach ($p in $oldEntry.Projects) {
+            if (-not $DepMap[$key].Projects.Contains($p)) { $DepMap[$key].Projects.Add($p) }
+        }
+        $DepMap.Remove($unresolvedKey)
+    }
+
+    if (-not $DepMap[$key].Sources.Contains($SourceTag)) {
+        $DepMap[$key].Sources.Add($SourceTag)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ProjectName) -and -not $DepMap[$key].Projects.Contains($ProjectName)) {
+        $DepMap[$key].Projects.Add($ProjectName)
+    }
+}
+
+function Resolve-DependencyFilePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileNameOrPath,
+        [Parameter(Mandatory = $true)][string]$BaseDir,
+        [Parameter(Mandatory = $true)][string]$ProductDir,
+        [AllowEmptyCollection()][string[]]$LibDirs = @(),
+        [Parameter(Mandatory = $true)][hashtable]$FilesByName
+    )
+    $candidate = Expand-MsBuildPath -RawPath $FileNameOrPath -ProjectDir $BaseDir -ProductDir $ProductDir
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        return [System.IO.Path]::GetFullPath($candidate)
+    }
+    $leafName = Split-Path -Path $FileNameOrPath -Leaf
+    foreach ($ld in $LibDirs) {
+        $inLibDir = Join-Path $ld $leafName
+        if (Test-Path -LiteralPath $inLibDir -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($inLibDir)
+        }
+    }
+    if ($FilesByName.ContainsKey($leafName)) {
+        return $FilesByName[$leafName][0].FullName
+    }
     return $null
 }
 
@@ -510,67 +865,40 @@ foreach ($prodDirItem in $productDirs) {
     $productName = $prodDirItem.Name
     $productDir  = $prodDirItem.FullName
 
-    # ファイルシステム上の正確な大文字・小文字パスを保持する辞書 (.tlog の大文字パス正規化用)
-    $onDiskPathMap = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    # 製品内の全ファイルを1回だけ走査してインデックス化 (obj/.vs/.git/TestResults/ipch は除外)
+    $onDiskPathLookup  = [hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $filesByNameLookup = [hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $productFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
     foreach ($fsItem in (Get-ChildItem -LiteralPath $productDir -File -Recurse)) {
-        $onDiskPathMap[$fsItem.FullName] = $fsItem.FullName
+        if (Test-IsExcludedPath -FullPath $fsItem.FullName -BaseDir $productDir) {
+            continue
+        }
+        $productFiles.Add($fsItem)
+        $onDiskPathLookup[$fsItem.FullName] = $fsItem.FullName
+
+        if (-not $filesByNameLookup.ContainsKey($fsItem.Name)) {
+            $filesByNameLookup[$fsItem.Name] = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+        }
+        $filesByNameLookup[$fsItem.Name].Add($fsItem)
     }
 
-    # 製品内の依存アイテムを管理する辞書 (Key: フルパス または 未解決ファイル名小文字)
-    $depMap = @{}
+    $depMap      = @{}
     $includeDirs = New-Object System.Collections.Generic.List[string]
     $libDirs     = New-Object System.Collections.Generic.List[string]
     $tlogHeaders = New-Object System.Collections.Generic.List[string]
 
-    function Register-Dependency {
-        param(
-            [Parameter(Mandatory = $true)][string]$FileName,
-            [string]$ResolvedPath,
-            [Parameter(Mandatory = $true)][string]$SourceTag,
-            [string]$ProjectName
-        )
-        $ext = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
-        if ($ext -ne '.lib' -and $ext -ne '.dll') {
-            return
-        }
-        if (-not $IncludeSystemLibs -and $StandardSystemLibs.Contains($FileName)) {
-            return
-        }
+    # --------------------------------------------------------------------------
+    # 1. .vcxproj / .csproj の解析
+    # --------------------------------------------------------------------------
+    $vcxprojFiles = @($productFiles | Where-Object { $_.Extension -ieq '.vcxproj' })
+    $csprojFiles  = @($productFiles | Where-Object { $_.Extension -ieq '.csproj' })
 
-        if (-not [string]::IsNullOrWhiteSpace($ResolvedPath) -and $onDiskPathMap.ContainsKey($ResolvedPath)) {
-            $ResolvedPath = $onDiskPathMap[$ResolvedPath]
-            $FileName     = Split-Path -Path $ResolvedPath -Leaf
-        }
-
-        $key = if (-not [string]::IsNullOrWhiteSpace($ResolvedPath) -and (Test-Path -LiteralPath $ResolvedPath)) {
-            [System.IO.Path]::GetFullPath($ResolvedPath).ToLowerInvariant()
-        }
-        else {
-            "unresolved::$($FileName.ToLowerInvariant())"
-        }
-
-        if (-not $depMap.ContainsKey($key)) {
-            $depMap[$key] = [PSCustomObject]@{
-                FileName     = $FileName
-                FileType     = $ext
-                FullPath     = $ResolvedPath
-                Sources      = New-Object System.Collections.Generic.List[string]
-                Projects     = New-Object System.Collections.Generic.List[string]
-            }
-        }
-        if (-not $depMap[$key].Sources.Contains($SourceTag)) {
-            $depMap[$key].Sources.Add($SourceTag)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($ProjectName) -and -not $depMap[$key].Projects.Contains($ProjectName)) {
-            $depMap[$key].Projects.Add($ProjectName)
-        }
+    # プロジェクト名 (拡張子なし) -> プロジェクトファイル名 マップ (tlogからの逆引き用)
+    $projNameMap = [hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($pf in ($vcxprojFiles + $csprojFiles)) {
+        $projNameMap[$pf.BaseName] = $pf.Name
     }
-
-    # --------------------------------------------------------------------------
-    # 1. .vcxproj / .csproj の解析 ( 먼저 IncludeDir / LibDir を収集 )
-    # --------------------------------------------------------------------------
-    $vcxprojFiles = @(Get-ChildItem -LiteralPath $productDir -Filter '*.vcxproj' -File -Recurse)
-    $csprojFiles  = @(Get-ChildItem -LiteralPath $productDir -Filter '*.csproj' -File -Recurse)
 
     foreach ($vcx in $vcxprojFiles) {
         $projDir = $vcx.DirectoryName
@@ -603,31 +931,52 @@ foreach ($prodDirItem in $productDirs) {
         }
     }
 
-    # ライブラリ名から実ファイルパスを解決するヘルパー
-    function Resolve-DepFilePath {
+    $libDirsArr = $libDirs.ToArray()
+
+    # .vcxproj / .csproj 共通の ProjectReference・Reference 解析処理
+    function Process-ProjectReferencesAndHints {
         param(
-            [Parameter(Mandatory = $true)][string]$FileNameOrPath,
-            [Parameter(Mandatory = $true)][string]$BaseDir
+            [xml]$XmlDoc,
+            [string]$ProjDir,
+            [string]$ProjName,
+            [string]$ProjKind
         )
-        $candidate = Expand-MsBuildPath -RawPath $FileNameOrPath -ProjectDir $BaseDir -ProductDir $productDir
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return [System.IO.Path]::GetFullPath($candidate)
-        }
-        $leafName = Split-Path -Path $FileNameOrPath -Leaf
-        foreach ($ld in $libDirs) {
-            $inLibDir = Join-Path $ld $leafName
-            if (Test-Path -LiteralPath $inLibDir -PathType Leaf) {
-                return [System.IO.Path]::GetFullPath($inLibDir)
+        # ProjectReference
+        $projRefNodes = $XmlDoc.SelectNodes("//*[local-name()='ProjectReference']")
+        foreach ($node in $projRefNodes) {
+            $incAttr = $node.GetAttribute('Include')
+            if ([string]::IsNullOrWhiteSpace($incAttr)) { continue }
+            $refProjPath = Expand-MsBuildPath -RawPath $incAttr -ProjectDir $ProjDir -ProductDir $productDir
+            $refProjDir  = Split-Path -Path $refProjPath -Parent
+            $refStem     = [System.IO.Path]::GetFileNameWithoutExtension($refProjPath)
+
+            if (Test-Path -LiteralPath $refProjDir) {
+                $refOutputs = @(Get-ChildItem -LiteralPath $refProjDir -File -Recurse | Where-Object {
+                    (-not (Test-IsExcludedPath -FullPath $_.FullName -BaseDir $productDir)) -and
+                    ($_.Extension -ieq '.lib' -or $_.Extension -ieq '.dll') -and
+                    ($_.BaseName -ieq $refStem)
+                })
+                foreach ($outFile in $refOutputs) {
+                    Register-DependencyItem -DepMap $depMap -OnDiskPathMap $onDiskPathLookup -StandardSystemLibs $StandardSystemLibs -IncludeSystemLibs ([bool]$IncludeSystemLibs) `
+                        -FileName $outFile.Name -ResolvedPath $outFile.FullName -SourceTag "${ProjKind}(ProjectReference)" -ProjectName $ProjName
+                }
             }
         }
-        $foundInProd = @(Get-ChildItem -LiteralPath $productDir -Filter $leafName -File -Recurse)
-        if ($foundInProd.Count -gt 0) {
-            return $foundInProd[0].FullName
+
+        # Reference (HintPath付きDLL参照)
+        $refNodes = $XmlDoc.SelectNodes("//*[local-name()='Reference']")
+        foreach ($node in $refNodes) {
+            $hintNode = $node.SelectSingleNode("*[local-name()='HintPath']")
+            if ($null -ne $hintNode -and -not [string]::IsNullOrWhiteSpace($hintNode.InnerText)) {
+                $hintPath = $hintNode.InnerText.Trim()
+                $leaf     = Split-Path -Path $hintPath -Leaf
+                $resolved = Resolve-DependencyFilePath -FileNameOrPath $hintPath -BaseDir $ProjDir -ProductDir $productDir -LibDirs $libDirsArr -FilesByName $filesByNameLookup
+                Register-DependencyItem -DepMap $depMap -OnDiskPathMap $onDiskPathLookup -StandardSystemLibs $StandardSystemLibs -IncludeSystemLibs ([bool]$IncludeSystemLibs) `
+                    -FileName $leaf -ResolvedPath $resolved -SourceTag "${ProjKind}(Reference)" -ProjectName $ProjName
+            }
         }
-        return $null
     }
 
-    # .vcxproj の AdditionalDependencies / ProjectReference / Reference を解析
     foreach ($vcx in $vcxprojFiles) {
         $projDir  = $vcx.DirectoryName
         $projName = $vcx.Name
@@ -641,66 +990,27 @@ foreach ($prodDirItem in $productDirs) {
                 if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -like '%(*)*') { continue }
                 $leaf = Split-Path -Path $trimmed -Leaf
                 if (-not $IncludeSystemLibs -and $StandardSystemLibs.Contains($leaf)) { continue }
-                $resolved = Resolve-DepFilePath -FileNameOrPath $trimmed -BaseDir $projDir
-                Register-Dependency -FileName $leaf -ResolvedPath $resolved -SourceTag 'vcxproj(AdditionalDependencies)' -ProjectName $projName
+                $resolved = Resolve-DependencyFilePath -FileNameOrPath $trimmed -BaseDir $projDir -ProductDir $productDir -LibDirs $libDirsArr -FilesByName $filesByNameLookup
+                Register-DependencyItem -DepMap $depMap -OnDiskPathMap $onDiskPathLookup -StandardSystemLibs $StandardSystemLibs -IncludeSystemLibs ([bool]$IncludeSystemLibs) `
+                    -FileName $leaf -ResolvedPath $resolved -SourceTag 'vcxproj(AdditionalDependencies)' -ProjectName $projName
             }
         }
 
-        # ProjectReference
-        $projRefNodes = $xmlDoc.SelectNodes("//*[local-name()='ProjectReference']")
-        foreach ($node in $projRefNodes) {
-            $incAttr = $node.GetAttribute('Include')
-            if ([string]::IsNullOrWhiteSpace($incAttr)) { continue }
-            $refProjPath = Expand-MsBuildPath -RawPath $incAttr -ProjectDir $projDir -ProductDir $productDir
-            $refProjDir  = Split-Path -Path $refProjPath -Parent
-            $refStem     = [System.IO.Path]::GetFileNameWithoutExtension($refProjPath)
-
-            if (Test-Path -LiteralPath $refProjDir) {
-                $refOutputs = @(Get-ChildItem -LiteralPath $refProjDir -File -Recurse | Where-Object {
-                    ($_.Extension -ieq '.lib' -or $_.Extension -ieq '.dll') -and ($_.BaseName -ieq $refStem)
-                })
-                foreach ($outFile in $refOutputs) {
-                    Register-Dependency -FileName $outFile.Name -ResolvedPath $outFile.FullName -SourceTag 'vcxproj(ProjectReference)' -ProjectName $projName
-                }
-            }
-        }
-
-        # Reference (C++/CLI や明示的DLL参照)
-        $refNodes = $xmlDoc.SelectNodes("//*[local-name()='Reference']")
-        foreach ($node in $refNodes) {
-            $hintNode = $node.SelectSingleNode("*[local-name()='HintPath']")
-            if ($null -ne $hintNode -and -not [string]::IsNullOrWhiteSpace($hintNode.InnerText)) {
-                $hintPath = $hintNode.InnerText.Trim()
-                $leaf     = Split-Path -Path $hintPath -Leaf
-                $resolved = Resolve-DepFilePath -FileNameOrPath $hintPath -BaseDir $projDir
-                Register-Dependency -FileName $leaf -ResolvedPath $resolved -SourceTag 'vcxproj(Reference)' -ProjectName $projName
-            }
-        }
+        Process-ProjectReferencesAndHints -XmlDoc $xmlDoc -ProjDir $projDir -ProjName $projName -ProjKind 'vcxproj'
     }
 
-    # .csproj の Reference / ProjectReference を解析
     foreach ($cs in $csprojFiles) {
         $projDir  = $cs.DirectoryName
         $projName = $cs.Name
         [xml]$xmlDoc = Read-TextAutoEncoding -FilePath $cs.FullName
-
-        $refNodes = $xmlDoc.SelectNodes("//*[local-name()='Reference']")
-        foreach ($node in $refNodes) {
-            $hintNode = $node.SelectSingleNode("*[local-name()='HintPath']")
-            if ($null -ne $hintNode -and -not [string]::IsNullOrWhiteSpace($hintNode.InnerText)) {
-                $hintPath = $hintNode.InnerText.Trim()
-                $leaf     = Split-Path -Path $hintPath -Leaf
-                $resolved = Resolve-DepFilePath -FileNameOrPath $hintPath -BaseDir $projDir
-                Register-Dependency -FileName $leaf -ResolvedPath $resolved -SourceTag 'csproj(Reference)' -ProjectName $projName
-            }
-        }
+        Process-ProjectReferencesAndHints -XmlDoc $xmlDoc -ProjDir $projDir -ProjName $projName -ProjKind 'csproj'
     }
 
     # --------------------------------------------------------------------------
     # 2. CL.read.*.tlog と link.read.*.tlog の解析
     # --------------------------------------------------------------------------
-    $clTlogs   = @(Get-ChildItem -LiteralPath $productDir -Filter 'CL.read.*.tlog' -File -Recurse)
-    $linkTlogs = @(Get-ChildItem -LiteralPath $productDir -Filter 'link.read.*.tlog' -File -Recurse)
+    $clTlogs   = @($productFiles | Where-Object { $_.Name -like 'CL.read.*.tlog' })
+    $linkTlogs = @($productFiles | Where-Object { $_.Name -like 'link.read.*.tlog' })
 
     foreach ($tlog in $clTlogs) {
         $content = Read-TextAutoEncoding -FilePath $tlog.FullName
@@ -709,8 +1019,8 @@ foreach ($prodDirItem in $productDirs) {
             if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('^') -or $line.StartsWith('#')) { continue }
             $ext = [System.IO.Path]::GetExtension($line)
             if ($ext -ieq '.h' -or $ext -ieq '.hpp' -or $ext -ieq '.hxx') {
-                if ($onDiskPathMap.ContainsKey($line)) {
-                    $exactHeader = $onDiskPathMap[$line]
+                if ($onDiskPathLookup.ContainsKey($line)) {
+                    $exactHeader = $onDiskPathLookup[$line]
                     if (-not $tlogHeaders.Contains($exactHeader)) {
                         $tlogHeaders.Add($exactHeader)
                     }
@@ -722,11 +1032,13 @@ foreach ($prodDirItem in $productDirs) {
                     }
                 }
                 else {
-                    # ビルド環境パスが異なる場合、製品内の同名ヘッダを検索
+                    # ビルド環境パスが異なる場合、製品内の同名ヘッダをインデックスから検索
                     $hLeaf = Split-Path -Path $line -Leaf
-                    $foundH = @(Get-ChildItem -LiteralPath $productDir -Filter $hLeaf -File -Recurse)
-                    if ($foundH.Count -gt 0 -and -not $tlogHeaders.Contains($foundH[0].FullName)) {
-                        $tlogHeaders.Add($foundH[0].FullName)
+                    if ($filesByNameLookup.ContainsKey($hLeaf)) {
+                        $candPath = $filesByNameLookup[$hLeaf][0].FullName
+                        if (-not $tlogHeaders.Contains($candPath)) {
+                            $tlogHeaders.Add($candPath)
+                        }
                     }
                 }
             }
@@ -734,6 +1046,16 @@ foreach ($prodDirItem in $productDirs) {
     }
 
     foreach ($tlog in $linkTlogs) {
+        # .tlog の親フォルダ名 (例: ProductA.tlog) から参照元プロジェクト名を特定
+        $tlogProjName = ''
+        $tlogParentLeaf = Split-Path -Path $tlog.DirectoryName -Leaf
+        if ($tlogParentLeaf -match '^(?<pname>.+)\.tlog$') {
+            $pStem = $Matches['pname']
+            if ($projNameMap.ContainsKey($pStem)) {
+                $tlogProjName = $projNameMap[$pStem]
+            }
+        }
+
         $content = Read-TextAutoEncoding -FilePath $tlog.FullName
         foreach ($rawLine in ($content -split '\r?\n')) {
             $line = $rawLine.Trim()
@@ -745,26 +1067,29 @@ foreach ($prodDirItem in $productDirs) {
                 if (-not $IncludeSystemLibs -and $line -imatch '\\WINDOWS KITS\\|\\MICROSOFT VISUAL STUDIO\\') { continue }
 
                 $resolved = $null
-                if (Test-Path -LiteralPath $line -PathType Leaf) {
+                if ($onDiskPathLookup.ContainsKey($line)) {
+                    $resolved = $onDiskPathLookup[$line]
+                }
+                elseif (Test-Path -LiteralPath $line -PathType Leaf) {
                     $resolved = (Get-Item -LiteralPath $line).FullName
                 }
                 else {
-                    $resolved = Resolve-DepFilePath -FileNameOrPath $leaf -BaseDir $productDir
+                    $resolved = Resolve-DependencyFilePath -FileNameOrPath $leaf -BaseDir $productDir -ProductDir $productDir -LibDirs $libDirsArr -FilesByName $filesByNameLookup
                 }
                 $canonicalName = if ($null -ne $resolved) { Split-Path -Path $resolved -Leaf } else { $leaf }
-                Register-Dependency -FileName $canonicalName -ResolvedPath $resolved -SourceTag 'tlog(link.read)' -ProjectName ''
+                Register-DependencyItem -DepMap $depMap -OnDiskPathMap $onDiskPathLookup -StandardSystemLibs $StandardSystemLibs -IncludeSystemLibs ([bool]$IncludeSystemLibs) `
+                    -FileName $canonicalName -ResolvedPath $resolved -SourceTag 'tlog(link.read)' -ProjectName $tlogProjName
             }
         }
     }
 
     # --------------------------------------------------------------------------
-    # 3. ファイルシステム上の .lib / .dll スキャン
+    # 3. ファイルシステム上の .lib / .dll スキャン (中間フォルダ除外済みインデックスを使用)
     # --------------------------------------------------------------------------
-    $fsFiles = @(Get-ChildItem -LiteralPath $productDir -File -Recurse | Where-Object {
-        $_.Extension -ieq '.lib' -or $_.Extension -ieq '.dll'
-    })
+    $fsFiles = @($productFiles | Where-Object { $_.Extension -ieq '.lib' -or $_.Extension -ieq '.dll' })
     foreach ($f in $fsFiles) {
-        Register-Dependency -FileName $f.Name -ResolvedPath $f.FullName -SourceTag 'FileSystem' -ProjectName ''
+        Register-DependencyItem -DepMap $depMap -OnDiskPathMap $onDiskPathLookup -StandardSystemLibs $StandardSystemLibs -IncludeSystemLibs ([bool]$IncludeSystemLibs) `
+            -FileName $f.Name -ResolvedPath $f.FullName -SourceTag 'FileSystem' -ProjectName ''
     }
 
     # --------------------------------------------------------------------------
@@ -774,13 +1099,13 @@ foreach ($prodDirItem in $productDirs) {
     foreach ($incDir in $includeDirs) {
         if (Test-Path -LiteralPath $incDir) {
             foreach ($h in (Get-ChildItem -LiteralPath $incDir -File -Recurse | Where-Object { $_.Extension -imatch '^\.h(?:pp|xx)?$' })) {
-                if (-not $includeDirHeaders.Contains($h.FullName)) {
+                if (-not (Test-IsExcludedPath -FullPath $h.FullName -BaseDir $productDir) -and -not $includeDirHeaders.Contains($h.FullName)) {
                     $includeDirHeaders.Add($h.FullName)
                 }
             }
         }
     }
-    $allProductHeaders = @(Get-ChildItem -LiteralPath $productDir -File -Recurse |
+    $allProductHeaders = @($productFiles |
         Where-Object { $_.Extension -imatch '^\.h(?:pp|xx)?$' } |
         ForEach-Object { $_.FullName })
 
@@ -790,14 +1115,15 @@ foreach ($prodDirItem in $productDirs) {
     # --------------------------------------------------------------------------
     $sortedDeps = $depMap.Values | Sort-Object FileType, FileName
     foreach ($dep in $sortedDeps) {
-        $matchedHeader = Find-AssociatedHeader `
+        $candidateHeaders = @(Find-AssociatedHeaders `
             -DepFileName $dep.FileName `
             -DepFullPath $dep.FullPath `
             -TlogHeaders $tlogHeaders.ToArray() `
             -IncludeDirHeaders $includeDirHeaders.ToArray() `
-            -AllProductHeaders $allProductHeaders
+            -AllProductHeaders $allProductHeaders)
 
-        $verResult = $null
+        $primaryHeader = if ($candidateHeaders.Count -gt 0) { $candidateHeaders[0] } else { '' }
+        $verResult     = $null
 
         # [優先順位 1] バイナリ情報 (.dll)
         if ($dep.FileType -ieq '.dll' -and -not [string]::IsNullOrWhiteSpace($dep.FullPath)) {
@@ -808,20 +1134,26 @@ foreach ($prodDirItem in $productDirs) {
         if ($null -eq $verResult) {
             $pathsToCheck = New-Object System.Collections.Generic.List[string]
             if (-not [string]::IsNullOrWhiteSpace($dep.FullPath)) { $pathsToCheck.Add($dep.FullPath) }
-            if (-not [string]::IsNullOrWhiteSpace($matchedHeader)) { $pathsToCheck.Add($matchedHeader) }
+            foreach ($ch in $candidateHeaders) { $pathsToCheck.Add($ch) }
             if ($pathsToCheck.Count -gt 0) {
-                $verResult = Get-FolderVersion -TargetPaths $pathsToCheck.ToArray() -ProductDir $productDir
+                $verResult = Get-FolderVersion -TargetPaths $pathsToCheck.ToArray() -ProductDir $productDir -RootDir $rootFull
             }
         }
 
-        # [優先順位 3] #define (.h ファイル)
-        if ($null -eq $verResult -and -not [string]::IsNullOrWhiteSpace($matchedHeader)) {
-            $verResult = Get-HeaderDefineVersion -HeaderPath $matchedHeader
+        # [優先順位 3] #define (.h ファイル群を優先順に探索)
+        if ($null -eq $verResult -and $candidateHeaders.Count -gt 0) {
+            foreach ($ch in $candidateHeaders) {
+                $verResult = Get-HeaderDefineVersion -HeaderPath $ch
+                if ($null -ne $verResult) { break }
+            }
         }
 
-        # [優先順位 4] 改訂履歴コメント (.h ファイル)
-        if ($null -eq $verResult -and -not [string]::IsNullOrWhiteSpace($matchedHeader)) {
-            $verResult = Get-HeaderHistoryVersion -HeaderPath $matchedHeader
+        # [優先順位 4] 改訂履歴コメント (.h ファイル群を優先順に探索)
+        if ($null -eq $verResult -and $candidateHeaders.Count -gt 0) {
+            foreach ($ch in $candidateHeaders) {
+                $verResult = Get-HeaderHistoryVersion -HeaderPath $ch
+                if ($null -ne $verResult) { break }
+            }
         }
 
         # [優先順位 5] 更新日時 (タイムスタンプフォールバック)
@@ -835,6 +1167,7 @@ foreach ($prodDirItem in $productDirs) {
                     Version       = $lastWriteStr
                     VersionSource = '更新日時'
                     Status        = 'OK'
+                    HeaderPath    = $primaryHeader
                     Notes         = 'バージョン記載なしのためファイル更新日時へフォールバック'
                 }
             }
@@ -843,23 +1176,30 @@ foreach ($prodDirItem in $productDirs) {
                     Version       = '不明(ファイル未検出)'
                     VersionSource = '未検出'
                     Status        = '要目視確認'
+                    HeaderPath    = $primaryHeader
                     Notes         = '実ファイルおよびヘッダが見つかりません'
                 }
             }
+        }
+
+        $usedHeaderPath = if ($verResult.PSObject.Properties['HeaderPath'] -and -not [string]::IsNullOrWhiteSpace($verResult.HeaderPath)) {
+            $verResult.HeaderPath
+        } else {
+            $primaryHeader
         }
 
         $relFilePath = if (-not [string]::IsNullOrWhiteSpace($dep.FullPath)) {
             Get-NormalizedRelativePath -BasePath $rootFull -TargetPath $dep.FullPath
         } else { '(未解決)' }
 
-        $relHeaderPath = if (-not [string]::IsNullOrWhiteSpace($matchedHeader)) {
-            Get-NormalizedRelativePath -BasePath $rootFull -TargetPath $matchedHeader
+        $relHeaderPath = if (-not [string]::IsNullOrWhiteSpace($usedHeaderPath)) {
+            Get-NormalizedRelativePath -BasePath $rootFull -TargetPath $usedHeaderPath
         } else { '' }
 
         $projDisplay = if ($dep.Projects.Count -gt 0) {
             ($dep.Projects -join '; ')
         } else {
-            '(tlog/フォルダ検出)'
+            '(フォルダ検出)'
         }
 
         $inventoryResults.Add([PSCustomObject]@{

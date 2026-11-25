@@ -43,6 +43,14 @@ $expectedCases = @(
         Status        = 'OK'
     },
     @{
+        Desc          = '優先度2(英字直結): Lua5.4.6 フォルダ名からメジャー欠落なく 5.4.6 を抽出'
+        Product       = 'ProductA'
+        FileName      = 'Lua.lib'
+        Version       = '5.4.6'
+        VersionSource = 'フォルダ名'
+        Status        = 'OK'
+    },
+    @{
         Desc          = '優先度3(a): #define 定義 (コメントアウトされたダミー定義除外 ＋ #define ＞ 改訂履歴)'
         Product       = 'ProductA'
         FileName      = 'AlphaDef.lib'
@@ -51,12 +59,22 @@ $expectedCases = @(
         Status        = 'OK'
     },
     @{
-        Desc          = '優先度3(a-2): tlogからのみ検出 ＋ MAJOR/MINOR/PATCH 分割 #define'
+        Desc          = '優先度3(a-2): tlogからのみ検出 ＋ MAJOR/MINOR/PATCH 分割 #define ＋ プロジェクト名特定'
         Product       = 'ProductA'
         FileName      = 'TlogOnlyLib.lib'
         Version       = '3.1.4'
         VersionSource = '#define'
         Status        = 'OK'
+        Project       = 'ProductA.vcxproj'
+    },
+    @{
+        Desc          = '優先度3(a-3): 末尾verヘッダ名(Server.h) ＋ //内/* ＋ ネスト#if 0除外'
+        Product       = 'ProductA'
+        FileName      = 'Server.lib'
+        Version       = '2.7.0'
+        VersionSource = '#define'
+        Status        = 'OK'
+        HeaderFile    = 'ProductA\include\Server.h'
     },
     @{
         Desc          = 'ProjectReference 経由の依存検出 ＋ #define'
@@ -99,6 +117,31 @@ $expectedCases = @(
         Status        = 'OK'
     },
     @{
+        Desc          = '優先度3(複数ヘッダ＋同一プレフィックス): MultiPkgVersion.h の MULTIPKG_* を結合'
+        Product       = 'ProductB'
+        FileName      = 'MultiPkg.lib'
+        Version       = '1.6.3'
+        VersionSource = '#define'
+        Status        = 'OK'
+        HeaderFile    = 'ProductB\MultiHeaderPkg\include\MultiPkgVersion.h'
+    },
+    @{
+        Desc          = '優先度4(同一バージョン履歴): 全行 1.0.0 の場合は重複確認せず OK 判定'
+        Product       = 'ProductB'
+        FileName      = 'SameVerHistory.lib'
+        Version       = '1.0.0'
+        VersionSource = '改訂履歴コメント'
+        Status        = 'OK'
+    },
+    @{
+        Desc          = '優先度4(一部日付欠落・矛盾): 日付矛盾を検知して要目視確認フラグを設定'
+        Product       = 'ProductB'
+        FileName      = 'PartialDateConflict.lib'
+        Version       = '先頭: 2.0.0 / 末尾: 1.8.0'
+        VersionSource = '改訂履歴コメント(順序不明)'
+        Status        = '要目視確認'
+    },
+    @{
         Desc          = '優先度4(順序不明): 改訂履歴の昇順・降順が判別不能 → 先頭と末尾の両方出力 ＋ 要目視確認'
         Product       = 'ProductB'
         FileName      = 'EpsilonAmbiguous.lib'
@@ -125,10 +168,14 @@ foreach ($exp in $expectedCases) {
         continue
     }
     $row = $match[0]
-    if ($row.Version -ne $exp.Version -or $row.VersionSource -ne $exp.VersionSource -or $row.Status -ne $exp.Status) {
+    $mismatch = ($row.Version -ne $exp.Version -or $row.VersionSource -ne $exp.VersionSource -or $row.Status -ne $exp.Status)
+    if ($exp.ContainsKey('Project') -and $row.Project -ne $exp.Project) { $mismatch = $true }
+    if ($exp.ContainsKey('HeaderFile') -and $row.HeaderFile -ne $exp.HeaderFile) { $mismatch = $true }
+
+    if ($mismatch) {
         Write-Host "[FAIL] $($exp.Desc)" -ForegroundColor Red
         Write-Host "       期待値: Version='$($exp.Version)', Source='$($exp.VersionSource)', Status='$($exp.Status)'" -ForegroundColor Red
-        Write-Host "       実際値: Version='$($row.Version)', Source='$($row.VersionSource)', Status='$($row.Status)'" -ForegroundColor Red
+        Write-Host "       実際値: Version='$($row.Version)', Source='$($row.VersionSource)', Status='$($row.Status)', Project='$($row.Project)', Header='$($row.HeaderFile)'" -ForegroundColor Red
         $failed++
     }
     else {
@@ -136,7 +183,52 @@ foreach ($exp in $expectedCases) {
     }
 }
 
+# 4. 中間ビルドフォルダ (obj/) 除外の検証
+$intermediateMatch = @($rows | Where-Object { $_.FileName -eq 'IntermediateDummy.dll' })
+if ($intermediateMatch.Count -gt 0) {
+    Write-Host "[FAIL] 中間ビルドフォルダ (obj/) 内の IntermediateDummy.dll が誤抽出されました。" -ForegroundColor Red
+    $failed++
+}
+else {
+    Write-Host "[PASS] 中間ビルドフォルダ (obj/) 内の DLL が除外されていることを確認" -ForegroundColor Green
+}
+
+# 5. 単一製品モード ＋ 製品フォルダ外共有ライブラリ (..\Shared\CommonSdk_v3.2.1) 参照の検証
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("InvTest_" + [System.Guid]::NewGuid().ToString('N'))
+try {
+    $appDir = Join-Path $tempRoot 'MyApp'
+    $extLibDir = Join-Path $tempRoot 'Shared\CommonSdk_v3.2.1\lib'
+    New-Item -ItemType Directory -Path $appDir, $extLibDir -Force | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $extLibDir 'CommonSdk.lib'), [System.Text.Encoding]::ASCII.GetBytes("!<arch>`n"))
+    $vcxText = @'
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>..\Shared\CommonSdk_v3.2.1\lib\CommonSdk.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
+'@
+    [System.IO.File]::WriteAllText((Join-Path $appDir 'MyApp.vcxproj'), $vcxText, (New-Object System.Text.UTF8Encoding($true)))
+    $tempCsv = Join-Path $tempRoot 'out.csv'
+    $extRows = @(& (Join-Path $PSScriptRoot 'Export-LibDllInventory.ps1') -RootPath $appDir -OutputCsvPath $tempCsv -PassThru)
+    $extMatch = @($extRows | Where-Object { $_.FileName -eq 'CommonSdk.lib' })
+    if ($extMatch.Count -eq 1 -and $extMatch[0].Version -eq '3.2.1' -and $extMatch[0].VersionSource -eq 'フォルダ名') {
+        Write-Host "[PASS] 製品フォルダ外の相対パス共有ライブラリ (..\Shared\CommonSdk_v3.2.1) から 3.2.1 を抽出" -ForegroundColor Green
+    }
+    else {
+        Write-Host "[FAIL] 製品フォルダ外の共有ライブラリ抽出に失敗しました" -ForegroundColor Red
+        $failed++
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $tempRoot) {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force
+    }
+}
+
 if ($failed -gt 0) {
     throw "検証失敗: $failed 件のテストケースが期待値と一致しませんでした。"
 }
-Write-Host "`n全 $($expectedCases.Count) パターンの検証に成功しました。" -ForegroundColor Cyan
+Write-Host "`n全テストケースの検証に成功しました。" -ForegroundColor Cyan
