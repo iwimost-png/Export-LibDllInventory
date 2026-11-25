@@ -101,6 +101,35 @@ $expectedCases = @(
         Status        = 'OK'
     },
     @{
+        Desc          = '優先度4(c-5): ヘッダ(1.420N) vs ソース(1.425P) 差異あり -> 最新のソース側 1.425P を採用'
+        Product       = 'ProductA'
+        FileName      = 'HistDiffSrcNewer.lib'
+        Version       = '1.425P'
+        VersionSource = '改訂履歴コメント(降順)'
+        Status        = 'OK'
+        HeaderFile    = 'ProductA\include\HistDiffSrcNewer.h'
+        SourceFile    = 'ProductA\src\HistDiffSrcNewer.cpp'
+    },
+    @{
+        Desc          = '優先度4(c-6): ヘッダ(1.420P) vs ソース(1.420N) 英文字比較 -> 最新のヘッダ側 1.420P を採用'
+        Product       = 'ProductA'
+        FileName      = 'HistDiffHdrNewer.lib'
+        Version       = '1.420P'
+        VersionSource = '改訂履歴コメント(昇順)'
+        Status        = 'OK'
+        HeaderFile    = 'ProductA\include\HistDiffHdrNewer.h'
+        SourceFile    = 'ProductA\src\HistDiffHdrNewer.cpp'
+    },
+    @{
+        Desc          = '優先度4(c-7): ヘッダなし・ソースコードのみ(1.420N->1.425P) -> 1.425P を抽出'
+        Product       = 'ProductB'
+        FileName      = 'SourceOnlyHist.lib'
+        Version       = '1.425P'
+        VersionSource = '改訂履歴コメント(昇順)'
+        Status        = 'OK'
+        SourceFile    = 'ProductB\src\SourceOnlyHist.cpp'
+    },
+    @{
         Desc          = '優先度1(.NET混在): .vcxproj / .csproj 双方から参照されるバイナリ情報付き .dll'
         Product       = 'ProductB'
         FileName      = 'ManagedCore.dll'
@@ -171,6 +200,7 @@ foreach ($exp in $expectedCases) {
     $mismatch = ($row.Version -ne $exp.Version -or $row.VersionSource -ne $exp.VersionSource -or $row.Status -ne $exp.Status)
     if ($exp.ContainsKey('Project') -and $row.Project -ne $exp.Project) { $mismatch = $true }
     if ($exp.ContainsKey('HeaderFile') -and $row.HeaderFile -ne $exp.HeaderFile) { $mismatch = $true }
+    if ($exp.ContainsKey('SourceFile') -and $row.SourceFile -ne $exp.SourceFile) { $mismatch = $true }
 
     if ($mismatch) {
         Write-Host "[FAIL] $($exp.Desc)" -ForegroundColor Red

@@ -12,7 +12,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)MultiHeaderPkg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;SameVerHistory.lib;PartialDateConflict.lib;MultiPkg.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;SameVerHistory.lib;PartialDateConflict.lib;MultiPkg.lib;SourceOnlyHist.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

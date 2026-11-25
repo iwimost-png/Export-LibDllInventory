@@ -11,7 +11,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)ThirdParty_v2.4.1\lib;$(ProjectDir)Lua5.4.6\lib;$(ProjectDir)SubCore\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;Lua.lib;Server.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;Lua.lib;Server.lib;HistDiffSrcNewer.lib;HistDiffHdrNewer.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -306,6 +306,62 @@ Write-TextFile -Path $subCoreVcxprojPath -Content $subCoreVcxprojContent
 $pluginSdkDllPath = Join-Path $prodADir 'bin\PluginSdk_v1.8.0\PluginSdk.dll'
 Write-BinaryDllWithVersion -Path $pluginSdkDllPath -ClassName 'PluginSdk' -FileVersion '1.8.2.0' -ProductVersion '1.8.2'
 
+# (c-5) ヘッダとソースコード双方に 1.○○○△ 形式の改訂履歴があり、ソースコード側が最新となるパターン
+# ヘッダ: 1.420N, ソースコード: 1.425P -> 期待抽出値: 1.425P
+$histSrcNewerHeaderPath = Join-Path $prodADir 'include\HistDiffSrcNewer.h'
+$histSrcNewerHeaderContent = @'
+#pragma once
+/*
+ * 改訂履歴
+ * 2025/02/10  1.420N  I/F拡張
+ * 2024/11/05  1.410K  初版作成
+ */
+namespace HistDiffSrcNewer {
+    void Execute();
+}
+'@
+$histSrcNewerSourcePath = Join-Path $prodADir 'src\HistDiffSrcNewer.cpp'
+$histSrcNewerSourceContent = @'
+#include "HistDiffSrcNewer.h"
+/*
+ * 改訂履歴
+ * 2025/05/20  1.425P  内部バッファ処理の不具合修正
+ * 2025/02/10  1.420N  I/F拡張
+ * 2024/11/05  1.410K  初版作成
+ */
+namespace HistDiffSrcNewer {
+    void Execute() {}
+}
+'@
+Write-TextFile -Path $histSrcNewerHeaderPath -Content $histSrcNewerHeaderContent
+Write-TextFile -Path $histSrcNewerSourcePath -Content $histSrcNewerSourceContent
+Write-DummyLib -Path (Join-Path $prodADir 'lib\HistDiffSrcNewer.lib') -LibName 'HistDiffSrcNewer.lib'
+
+# (c-6) ヘッダとソースコード双方に 1.○○○△ 形式の改訂履歴があり、ヘッダ側が最新（同数値部＋英文字比較）となるパターン
+# ヘッダ(日付なし・昇順): 1.420N -> 1.420P, ソースコード: 1.420M -> 1.420N -> 期待抽出値: 1.420P
+$histHdrNewerHeaderPath = Join-Path $prodADir 'include\HistDiffHdrNewer.h'
+$histHdrNewerHeaderContent = @'
+#pragma once
+// 改訂履歴
+// 1.420N  初期公開
+// 1.420P  APIシグネチャ修正
+namespace HistDiffHdrNewer {
+    int GetVersionCode();
+}
+'@
+$histHdrNewerSourcePath = Join-Path $prodADir 'src\HistDiffHdrNewer.cpp'
+$histHdrNewerSourceContent = @'
+#include "HistDiffHdrNewer.h"
+// 1.420M  試作
+// 1.420N  初期実装
+namespace HistDiffHdrNewer {
+    int GetVersionCode() { return 1420; }
+}
+'@
+Write-TextFile -Path $histHdrNewerHeaderPath -Content $histHdrNewerHeaderContent
+Write-TextFile -Path $histHdrNewerSourcePath -Content $histHdrNewerSourceContent
+Write-DummyLib -Path (Join-Path $prodADir 'lib\HistDiffHdrNewer.lib') -LibName 'HistDiffHdrNewer.lib'
+
 # ProductA.vcxproj
 $prodAVcxprojPath = Join-Path $prodADir 'ProductA.vcxproj'
 $prodAVcxprojContent = @'
@@ -322,7 +378,7 @@ $prodAVcxprojContent = @'
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)ThirdParty_v2.4.1\lib;$(ProjectDir)Lua5.4.6\lib;$(ProjectDir)SubCore\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;Lua.lib;Server.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>AlphaDef.lib;BetaDesc.lib;GammaAsc.lib;ThirdParty.lib;Lua.lib;Server.lib;HistDiffSrcNewer.lib;HistDiffHdrNewer.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -507,6 +563,19 @@ $prodBCsprojContent = @'
 '@
 Write-TextFile -Path $prodBCsprojPath -Content $prodBCsprojContent
 
+# (c-7) ヘッダなし・ソースコードのみに 1.○○○△ 形式の改訂履歴があるパターン（期待抽出値: 1.425P）
+$sourceOnlyHistPath = Join-Path $prodBDir 'src\SourceOnlyHist.cpp'
+$sourceOnlyHistContent = @'
+/*
+ * 改訂履歴
+ * 2024/09/01  1.420N  ベースライン実装
+ * 2025/03/15  1.425P  境界チェック追加
+ */
+int SourceOnlyHelper() { return 0; }
+'@
+Write-TextFile -Path $sourceOnlyHistPath -Content $sourceOnlyHistContent
+Write-DummyLib -Path (Join-Path $prodBDir 'lib\SourceOnlyHist.lib') -LibName 'SourceOnlyHist.lib'
+
 # ProductB.vcxproj (C++ / .NET 混在プロジェクト)
 $prodBVcxprojPath = Join-Path $prodBDir 'ProductB.vcxproj'
 $prodBVcxprojContent = @'
@@ -524,7 +593,7 @@ $prodBVcxprojContent = @'
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;$(ProjectDir)MultiHeaderPkg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;SameVerHistory.lib;PartialDateConflict.lib;MultiPkg.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>DeltaNoVer.lib;EpsilonAmbiguous.lib;SameVerHistory.lib;PartialDateConflict.lib;MultiPkg.lib;SourceOnlyHist.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -435,25 +435,25 @@ function Get-FolderVersion {
     return $null
 }
 
-function Get-HeaderDefineVersion {
-    param([Parameter(Mandatory = $true)][string]$HeaderPath)
-    if (-not (Test-Path -LiteralPath $HeaderPath)) {
+function Get-CodeDefineVersion {
+    param([Parameter(Mandatory = $true)][string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
         return $null
     }
-    $rawContent = Read-TextAutoEncoding -FilePath $HeaderPath
-    $headerLeaf = Split-Path -Path $HeaderPath -Leaf
+    $rawContent = Read-TextAutoEncoding -FilePath $FilePath
+    $fileLeaf   = Split-Path -Path $FilePath -Leaf
     $cleaned    = Remove-CppCommentsAndDisabledIf0 -SourceText $rawContent
 
-    # パターンA: 単一マクロによるバージョン文字列/数値定義 (例: #define ALPHA_VERSION "1.4.2")
-    $singleRegex = '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*(?:VER|VERSION|RELEASE)[A-Za-z0-9_]*)\s+["'']?v?(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\._]+)?)["'']?(?:\s|$)'
+    # パターンA: 単一マクロによるバージョン文字列/数値定義 (例: #define ALPHA_VERSION "1.4.2", "1.425P")
+    $singleRegex = '(?im)^\s*#\s*define\s+(?<macro>[A-Za-z_][A-Za-z0-9_]*(?:VER|VERSION|RELEASE)[A-Za-z0-9_]*)\s+["'']?v?(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:[A-Za-z]+)?(?:-[0-9A-Za-z\._]+)?)["'']?(?:\s|$)'
     $mSingle = [regex]::Match($cleaned, $singleRegex)
     if ($mSingle.Success) {
         return [PSCustomObject]@{
             Version       = $mSingle.Groups['ver'].Value
             VersionSource = '#define'
             Status        = 'OK'
-            HeaderPath    = $HeaderPath
-            Notes         = "#define $($mSingle.Groups['macro'].Value) ($headerLeaf)"
+            SourceFile    = $FilePath
+            Notes         = "#define $($mSingle.Groups['macro'].Value) ($fileLeaf)"
         }
     }
 
@@ -474,8 +474,8 @@ function Get-HeaderDefineVersion {
                 Version       = $verStr
                 VersionSource = '#define'
                 Status        = 'OK'
-                HeaderPath    = $HeaderPath
-                Notes         = "#define ${prefix}_MAJOR 他 ($headerLeaf)"
+                SourceFile    = $FilePath
+                Notes         = "#define ${prefix}_MAJOR 他 ($fileLeaf)"
             }
         }
     }
@@ -483,13 +483,13 @@ function Get-HeaderDefineVersion {
     return $null
 }
 
-function Get-HeaderHistoryVersion {
-    param([Parameter(Mandatory = $true)][string]$HeaderPath)
-    if (-not (Test-Path -LiteralPath $HeaderPath)) {
+function Get-CodeHistoryVersion {
+    param([Parameter(Mandatory = $true)][string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
         return $null
     }
-    $rawContent = Read-TextAutoEncoding -FilePath $HeaderPath
-    $headerLeaf = Split-Path -Path $HeaderPath -Leaf
+    $rawContent = Read-TextAutoEncoding -FilePath $FilePath
+    $fileLeaf   = Split-Path -Path $FilePath -Leaf
 
     # 文字列リテラルをスキップしつつ、連続するコメントブロック単位で抽出
     $tokenRegex = '(?s)"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|(?://(?:\\\r?\n|[^\r\n])*(?:\r?\n\s*//(?:\\\r?\n|[^\r\n])*)*)|/\*.*?\*/'
@@ -505,13 +505,18 @@ function Get-HeaderHistoryVersion {
         return $null
     }
 
-    $datePattern = '(?<date>(?:19|20)\d{2}[/\-\.](?:0?[1-9]|1[0-2])[/\-\.](?:0?[1-9]|[12]\d|3[01]))'
-    $verWithPrefixPattern = '(?:(?:^|[^A-Za-z0-9_])(?:Ver\.?|Version|Rev\.?|v|V)|版)\s*:?\s*(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)\b'
-    $verBarePattern = '\b(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z\.]+)?)\b'
+    $datePattern           = '(?<date>(?:19|20)\d{2}[/\-\.](?:0?[1-9]|1[0-2])[/\-\.](?:0?[1-9]|[12]\d|3[01]))'
+    $verWithPrefixPattern  = '(?:(?:^|[^A-Za-z0-9_])(?:Ver\.?|Version|Rev\.?|v|V)|版)\s*:?\s*(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:[A-Za-z]+)?(?:-[0-9A-Za-z\.]+)?)(?![A-Za-z0-9_])'
+    $verBarePattern        = '(?<![A-Za-z0-9_.])(?<ver>\d+\.\d+(?:\.\d+){0,2}(?:[A-Za-z]+)?(?:-[0-9A-Za-z\.]+)?)(?![A-Za-z0-9_.])'
+    $verAlphaStrictPattern = '(?<![A-Za-z0-9_.])(?<ver>\d+\.\d{2,}[A-Z]+)(?![A-Za-z0-9_.])'
+    $verAlphaBlockPattern  = '(?<![A-Za-z0-9_.])(?<ver>\d+\.\d+[A-Za-z]+)(?![A-Za-z0-9_.])'
     $historyKeywordPattern = '(?i)(?:改訂|変更|更新|履歴|History|Change\s*Log|Changelog|Revision)'
 
     function Parse-HistoryEntriesFromText {
-        param([string]$BlockText)
+        param(
+            [string]$BlockText,
+            [bool]$IsHistoryKeywordBlock = $false
+        )
         $list = New-Object System.Collections.Generic.List[PSCustomObject]
         foreach ($line in ($BlockText -split '\r?\n')) {
             $hasDate = $line -match $datePattern
@@ -525,8 +530,11 @@ function Get-HeaderHistoryVersion {
             }
 
             $extractedVer = $null
-            if ($line -match $verWithPrefixPattern) {
-                $extractedVer = $Matches['ver']
+            $mPrefix = [regex]::Match($line, $verWithPrefixPattern)
+            $mAlphaStrict = [regex]::Match($line, $verAlphaStrictPattern)
+
+            if ($mPrefix.Success -and (-not $mAlphaStrict.Success -or $mPrefix.Index -le $mAlphaStrict.Index)) {
+                $extractedVer = $mPrefix.Groups['ver'].Value
             }
             elseif ($hasDate) {
                 $lineWithoutDate = $line -replace $datePattern, ''
@@ -534,13 +542,19 @@ function Get-HeaderHistoryVersion {
                     $extractedVer = $Matches['ver']
                 }
             }
+            elseif ($IsHistoryKeywordBlock -and $line -match $verAlphaBlockPattern) {
+                $extractedVer = $Matches['ver']
+            }
+            elseif ($mAlphaStrict.Success) {
+                $extractedVer = $mAlphaStrict.Groups['ver'].Value
+            }
 
             if ($null -ne $extractedVer) {
                 $list.Add([PSCustomObject]@{
-                    RawVersion   = $extractedVer
-                    VersionTuple = (ConvertTo-VersionTuple -VersionString $extractedVer)
-                    Date         = $parsedDate
-                    Line         = $line.Trim()
+                    RawVersion = $extractedVer
+                    VersionKey = (ConvertTo-VersionKey -VersionString $extractedVer)
+                    Date       = $parsedDate
+                    Line       = $line.Trim()
                 })
             }
         }
@@ -554,12 +568,13 @@ function Get-HeaderHistoryVersion {
     $allEntries       = New-Object System.Collections.Generic.List[PSCustomObject]
 
     foreach ($blk in $commentBlocks) {
-        $blkEntries = @(Parse-HistoryEntriesFromText -BlockText $blk)
+        $hasKeyword = ($blk -match $historyKeywordPattern)
+        $blkEntries = @(Parse-HistoryEntriesFromText -BlockText $blk -IsHistoryKeywordBlock $hasKeyword)
         foreach ($e in $blkEntries) {
             $allEntries.Add($e)
         }
-        if ($blkEntries.Count -ge 2 -or ($blkEntries.Count -ge 1 -and $blk -match $historyKeywordPattern)) {
-            $score = $blkEntries.Count * 10 + $(if ($blk -match $historyKeywordPattern) { 5 } else { 0 })
+        if ($blkEntries.Count -ge 2 -or ($blkEntries.Count -ge 1 -and $hasKeyword)) {
+            $score = $blkEntries.Count * 10 + $(if ($hasKeyword) { 5 } else { 0 })
             if ($score -gt $bestBlockScore) {
                 $bestBlockScore   = $score
                 $bestBlockEntries = $blkEntries
@@ -577,8 +592,8 @@ function Get-HeaderHistoryVersion {
             Version       = $entries[0].RawVersion
             VersionSource = '改訂履歴コメント'
             Status        = 'OK'
-            HeaderPath    = $HeaderPath
-            Notes         = "改訂履歴1件のみ ($headerLeaf)"
+            SourceFile    = $FilePath
+            Notes         = "改訂履歴1件のみ ($fileLeaf)"
         }
     }
 
@@ -588,7 +603,7 @@ function Get-HeaderHistoryVersion {
     $verHasStrictDiff = $false
 
     for ($i = 0; $i -lt ($entries.Count - 1); $i++) {
-        $cmpVer = Compare-VersionTuple -TupleA $entries[$i].VersionTuple -TupleB $entries[$i + 1].VersionTuple
+        $cmpVer = Compare-VersionKey -KeyA $entries[$i].VersionKey -KeyB $entries[$i + 1].VersionKey
         if ($cmpVer -lt 0) {
             $verNonIncreasing = $false
             $verHasStrictDiff = $true
@@ -623,10 +638,10 @@ function Get-HeaderHistoryVersion {
     $verIsDesc = $verNonIncreasing -and $verHasStrictDiff
     $verAllEq  = $verNonDecreasing -and $verNonIncreasing
 
-    $dateIsAsc      = $hasEnoughDates -and $dateNonDecreasing -and $dateHasStrictDiff
-    $dateIsDesc     = $hasEnoughDates -and $dateNonIncreasing -and $dateHasStrictDiff
-    $dateAllEq      = $hasEnoughDates -and $dateNonDecreasing -and $dateNonIncreasing
-    $dateConflict   = $hasEnoughDates -and (-not $dateNonDecreasing) -and (-not $dateNonIncreasing)
+    $dateIsAsc    = $hasEnoughDates -and $dateNonDecreasing -and $dateHasStrictDiff
+    $dateIsDesc   = $hasEnoughDates -and $dateNonIncreasing -and $dateHasStrictDiff
+    $dateAllEq    = $hasEnoughDates -and $dateNonDecreasing -and $dateNonIncreasing
+    $dateConflict = $hasEnoughDates -and (-not $dateNonDecreasing) -and (-not $dateNonIncreasing)
 
     $firstVer = $entries[0].RawVersion
     $lastVer  = $entries[$entries.Count - 1].RawVersion
@@ -642,8 +657,8 @@ function Get-HeaderHistoryVersion {
             Version       = $firstVer
             VersionSource = '改訂履歴コメント'
             Status        = 'OK'
-            HeaderPath    = $HeaderPath
-            Notes         = "改訂履歴内のバージョンがすべて同一 (全$($entries.Count)件: $firstVer) [$headerLeaf]"
+            SourceFile    = $FilePath
+            Notes         = "改訂履歴内のバージョンがすべて同一 (全$($entries.Count)件: $firstVer) [$fileLeaf]"
         }
     }
     else {
@@ -656,8 +671,8 @@ function Get-HeaderHistoryVersion {
             Version       = $firstVer
             VersionSource = '改訂履歴コメント(降順)'
             Status        = 'OK'
-            HeaderPath    = $HeaderPath
-            Notes         = "改訂履歴先頭を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$headerLeaf]"
+            SourceFile    = $FilePath
+            Notes         = "改訂履歴先頭を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$fileLeaf]"
         }
     }
     elseif ($isAscending -and -not $isDescending) {
@@ -665,8 +680,8 @@ function Get-HeaderHistoryVersion {
             Version       = $lastVer
             VersionSource = '改訂履歴コメント(昇順)'
             Status        = 'OK'
-            HeaderPath    = $HeaderPath
-            Notes         = "改訂履歴末尾を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$headerLeaf]"
+            SourceFile    = $FilePath
+            Notes         = "改訂履歴末尾を採用 (全$($entries.Count)件: 先頭=$firstVer, 末尾=$lastVer) [$fileLeaf]"
         }
     }
     else {
@@ -674,82 +689,219 @@ function Get-HeaderHistoryVersion {
             Version       = "先頭: $firstVer / 末尾: $lastVer"
             VersionSource = '改訂履歴コメント(順序不明)'
             Status        = '要目視確認'
-            HeaderPath    = $HeaderPath
-            Notes         = "履歴の昇順・降順が判別不能なため先頭と末尾を併記 (全$($entries.Count)件) [$headerLeaf]"
+            SourceFile    = $FilePath
+            Notes         = "履歴の昇順・降順が判別不能なため先頭と末尾を併記 (全$($entries.Count)件) [$fileLeaf]"
         }
     }
 }
 
-function Find-AssociatedHeaders {
+function Select-LatestVersionResult {
+    <#
+    .SYNOPSIS
+        複数のヘッダ／ソースファイルから抽出したバージョン候補を比較し、最新のバージョンを採用します。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates
+    )
+    if ($Candidates.Count -eq 0) {
+        return $null
+    }
+    if ($Candidates.Count -eq 1) {
+        return $Candidates[0]
+    }
+
+    $okResults    = @($Candidates | Where-Object { $_.Status -eq 'OK' })
+    $ambigResults = @($Candidates | Where-Object { $_.Status -ne 'OK' })
+
+    if ($okResults.Count -eq 0) {
+        return $ambigResults[0]
+    }
+
+    $best = $okResults[0]
+    $bestKey = ConvertTo-VersionKey -VersionString $best.Version
+    for ($i = 1; $i -lt $okResults.Count; $i++) {
+        $candKey = ConvertTo-VersionKey -VersionString $okResults[$i].Version
+        if ((Compare-VersionKey -KeyA $candKey -KeyB $bestKey) -gt 0) {
+            $best    = $okResults[$i]
+            $bestKey = $candKey
+        }
+    }
+
+    $detailParts = New-Object System.Collections.Generic.List[string]
+    $distinctVers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in $Candidates) {
+        $leaf = Split-Path -Path $c.SourceFile -Leaf
+        $detailParts.Add("${leaf}=$($c.Version)")
+        if ($c.Status -eq 'OK') {
+            [void]$distinctVers.Add($c.Version)
+        }
+    }
+    $detailSummary = $detailParts -join ', '
+    $bestLeaf = Split-Path -Path $best.SourceFile -Leaf
+
+    if ($ambigResults.Count -gt 0) {
+        return [PSCustomObject]@{
+            Version       = $best.Version
+            VersionSource = $best.VersionSource
+            Status        = '要目視確認'
+            SourceFile    = $best.SourceFile
+            Notes         = "一部ファイルの改訂履歴が順序不明のため要確認; 有効側の最新=${bestLeaf}($($best.Version)) [$detailSummary]"
+        }
+    }
+
+    $noteText = if ($distinctVers.Count -gt 1) {
+        "複数ファイルのバージョンを比較し最新を採用: ${bestLeaf}=$($best.Version) [$detailSummary]"
+    } else {
+        "複数ファイルでバージョン一致: $($best.Version) [$detailSummary]"
+    }
+
+    return [PSCustomObject]@{
+        Version       = $best.Version
+        VersionSource = $best.VersionSource
+        Status        = 'OK'
+        SourceFile    = $best.SourceFile
+        Notes         = $noteText
+    }
+}
+
+function Find-AssociatedCodeFiles {
+    <#
+    .SYNOPSIS
+        依存ライブラリに対応するヘッダファイル (.h/.hpp/.hxx) およびソースファイル (.c/.cpp/.cxx/.cc) を探索します。
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$DepFileName,
         [string]$DepFullPath,
+        [Parameter(Mandatory = $true)][string]$ProductDir,
         [AllowEmptyCollection()][string[]]$TlogHeaders = @(),
         [AllowEmptyCollection()][string[]]$IncludeDirHeaders = @(),
-        [AllowEmptyCollection()][string[]]$AllProductHeaders = @()
+        [AllowEmptyCollection()][string[]]$AllProductHeaders = @(),
+        [AllowEmptyCollection()][string[]]$AllProductSources = @(),
+        [hashtable]$ProjectCodeFilesByStem = @{}
     )
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($DepFileName)
     $normName = $baseName -ireplace '^lib(?=[A-Za-z])', ''
     $normName = $normName -ireplace '(?:_d|_debug|_release|_x64|_x86|_static|_dll)$', ''
 
-    $results = New-Object System.Collections.Generic.List[string]
-    $seen    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $headers     = New-Object System.Collections.Generic.List[string]
+    $sources     = New-Object System.Collections.Generic.List[string]
+    $seenHeaders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $seenSources = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    function Add-Candidate {
-        param([string]$PathToAdd)
-        if (-not [string]::IsNullOrWhiteSpace($PathToAdd) -and $seen.Add($PathToAdd)) {
-            $results.Add($PathToAdd)
+    function Add-MatchedFile {
+        param(
+            [string]$PathToAdd,
+            [string]$Kind
+        )
+        if ([string]::IsNullOrWhiteSpace($PathToAdd)) { return }
+        if ($Kind -eq 'Header') {
+            if ($seenHeaders.Add($PathToAdd)) { $headers.Add($PathToAdd) }
+        }
+        else {
+            if ($seenSources.Add($PathToAdd)) { $sources.Add($PathToAdd) }
         }
     }
 
-    $pools = @($TlogHeaders, $IncludeDirHeaders, $AllProductHeaders)
-
-    # 1. Exact stem match (例: Foo.lib -> Foo.h)
-    foreach ($pool in $pools) {
-        foreach ($hPath in $pool) {
-            if ([string]::IsNullOrWhiteSpace($hPath)) { continue }
-            $hStem = [System.IO.Path]::GetFileNameWithoutExtension($hPath)
-            if ($hStem -ieq $baseName) {
-                Add-Candidate -PathToAdd $hPath
+    function Match-PoolsByStem {
+        param(
+            [object[]]$Pools,
+            [string]$Kind
+        )
+        # 1. Exact stem match (例: Foo.lib -> Foo.h / Foo.cpp)
+        foreach ($pool in $Pools) {
+            foreach ($fPath in $pool) {
+                if ([string]::IsNullOrWhiteSpace($fPath)) { continue }
+                $fStem = [System.IO.Path]::GetFileNameWithoutExtension($fPath)
+                if ($fStem -ieq $baseName) {
+                    Add-MatchedFile -PathToAdd $fPath -Kind $Kind
+                }
+            }
+        }
+        # 2. Normalized stem match (例: Foo.lib -> Foo_version.h / FooVersion.cpp)
+        foreach ($pool in $Pools) {
+            foreach ($fPath in $pool) {
+                if ([string]::IsNullOrWhiteSpace($fPath)) { continue }
+                $fStem = [System.IO.Path]::GetFileNameWithoutExtension($fPath)
+                $fNorm = [regex]::Replace($fStem, '(?:(?i)[_-](?:version|ver)$|(?-i:Version)$)', '')
+                if ($fStem -ieq $normName -or (-not [string]::IsNullOrWhiteSpace($fNorm) -and $fNorm -ieq $normName)) {
+                    Add-MatchedFile -PathToAdd $fPath -Kind $Kind
+                }
             }
         }
     }
 
-    # 2. Normalized stem match (例: Foo.lib -> Foo_version.h, FooVersion.h)
-    #    ※ Server.h や DeltaNoVer.h を誤って削らないよう区切り文字付き、または大文字始まりの Version のみ除去
-    foreach ($pool in $pools) {
-        foreach ($hPath in $pool) {
-            if ([string]::IsNullOrWhiteSpace($hPath)) { continue }
-            $hStem = [System.IO.Path]::GetFileNameWithoutExtension($hPath)
-            $hNorm = [regex]::Replace($hStem, '(?:(?i)[_-](?:version|ver)$|(?-i:Version)$)', '')
-            if ($hStem -ieq $normName -or (-not [string]::IsNullOrWhiteSpace($hNorm) -and $hNorm -ieq $normName)) {
-                Add-Candidate -PathToAdd $hPath
-            }
+    # ライブラリ自身をビルドする .vcxproj がある場合はその ClInclude / ClCompile を優先プールに含める
+    $projHeaders = @()
+    $projSources = @()
+    foreach ($stemKey in @($baseName, $normName)) {
+        if (-not [string]::IsNullOrWhiteSpace($stemKey) -and $ProjectCodeFilesByStem.ContainsKey($stemKey)) {
+            $projEntry = $ProjectCodeFilesByStem[$stemKey]
+            $projHeaders += @($projEntry.Headers)
+            $projSources += @($projEntry.Sources)
         }
     }
 
-    # 3. 同一パッケージディレクトリ配下の include/*.h マッチ
-    #    (1ファイルのみの場合はそのヘッダ、複数ある場合は *version*.h / *ver*.h を優先追加)
+    Match-PoolsByStem -Pools @($projHeaders, $TlogHeaders, $IncludeDirHeaders, $AllProductHeaders) -Kind 'Header'
+    Match-PoolsByStem -Pools @($projSources, $AllProductSources) -Kind 'Source'
+
+    # 3. ライブラリ固有プロジェクト配下の残りの ClInclude / ClCompile を追加
+    foreach ($ph in $projHeaders) { Add-MatchedFile -PathToAdd $ph -Kind 'Header' }
+    foreach ($ps in $projSources) { Add-MatchedFile -PathToAdd $ps -Kind 'Source' }
+
+    # 4. 同一パッケージディレクトリ配下の include/ と src/ マッチ
     if (-not [string]::IsNullOrWhiteSpace($DepFullPath) -and (Test-Path -LiteralPath $DepFullPath)) {
-        $libDir = Split-Path -Path $DepFullPath -Parent
-        $pkgDir = Split-Path -Path $libDir -Parent
+        $libDir      = Split-Path -Path $DepFullPath -Parent
+        $pkgDir      = Split-Path -Path $libDir -Parent
+        $productFull = [System.IO.Path]::GetFullPath($ProductDir).TrimEnd('\', '/')
+
         if (-not [string]::IsNullOrWhiteSpace($pkgDir)) {
             $siblingInc = Join-Path $pkgDir 'include'
             if (Test-Path -LiteralPath $siblingInc) {
-                $candidates = @(Get-ChildItem -LiteralPath $siblingInc -File -Recurse | Where-Object { $_.Extension -imatch '^\.h(?:pp|xx)?$' })
-                if ($candidates.Count -eq 1) {
-                    Add-Candidate -PathToAdd $candidates[0].FullName
+                $incCands = @(Get-ChildItem -LiteralPath $siblingInc -File -Recurse | Where-Object {
+                    (-not (Test-IsExcludedPath -FullPath $_.FullName -BaseDir $ProductDir)) -and
+                    ($_.Extension -imatch '^\.h(?:pp|xx)?$')
+                })
+                if ($incCands.Count -eq 1) {
+                    Add-MatchedFile -PathToAdd $incCands[0].FullName -Kind 'Header'
                 }
-                elseif ($candidates.Count -gt 1) {
-                    foreach ($c in ($candidates | Where-Object { $_.BaseName -imatch '(?:^|[_-])(?:version|ver)$|(?-i:Version)' } | Sort-Object Name)) {
-                        Add-Candidate -PathToAdd $c.FullName
+                elseif ($incCands.Count -gt 1) {
+                    foreach ($c in ($incCands | Where-Object { $_.BaseName -imatch '(?:^|[_-])(?:version|ver)$|(?-i:Version)' } | Sort-Object Name)) {
+                        Add-MatchedFile -PathToAdd $c.FullName -Kind 'Header'
+                    }
+                }
+            }
+
+            # サブパッケージ固有ディレクトリ ($pkgDir != $productDir) の場合、同パッケージ内のソースファイルも探索
+            $pkgFull = [System.IO.Path]::GetFullPath($pkgDir).TrimEnd('\', '/')
+            if ($pkgFull -ine $productFull) {
+                $siblingLibs = @(Get-ChildItem -LiteralPath $libDir -Filter '*.lib' -File)
+                $isSingleLibPkg = ($siblingLibs.Count -le 1)
+                $pkgSearchDirs = @((Join-Path $pkgDir 'src'), (Join-Path $pkgDir 'source'), $pkgDir) | Where-Object { Test-Path -LiteralPath $_ }
+
+                foreach ($sDir in $pkgSearchDirs) {
+                    $recurseFlag = ($sDir -ine $pkgDir)
+                    $srcCands = @(Get-ChildItem -LiteralPath $sDir -File -Recurse:$recurseFlag | Where-Object {
+                        (-not (Test-IsExcludedPath -FullPath $_.FullName -BaseDir $ProductDir)) -and
+                        ($_.Extension -imatch '^\.c(?:pp|xx|c)?$')
+                    } | Sort-Object FullName)
+
+                    if ($isSingleLibPkg) {
+                        foreach ($sc in $srcCands) {
+                            Add-MatchedFile -PathToAdd $sc.FullName -Kind 'Source'
+                        }
+                    }
+                    else {
+                        Match-PoolsByStem -Pools @(, @($srcCands | ForEach-Object { $_.FullName })) -Kind 'Source'
                     }
                 }
             }
         }
     }
 
-    return $results.ToArray()
+    return [PSCustomObject]@{
+        Headers = $headers.ToArray()
+        Sources = $sources.ToArray()
+    }
 }
 
 function Register-DependencyItem {
@@ -900,9 +1052,52 @@ foreach ($prodDirItem in $productDirs) {
         $projNameMap[$pf.BaseName] = $pf.Name
     }
 
+    # StaticLibrary / DynamicLibrary プロジェクトが所有する ClInclude / ClCompile を収集
+    $projectCodeFilesByStem = [hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+
     foreach ($vcx in $vcxprojFiles) {
         $projDir = $vcx.DirectoryName
         [xml]$xmlDoc = Read-TextAutoEncoding -FilePath $vcx.FullName
+
+        $cfgTypeNode = $xmlDoc.SelectSingleNode("//*[local-name()='ConfigurationType']")
+        $cfgType = if ($null -ne $cfgTypeNode) { $cfgTypeNode.InnerText.Trim() } else { '' }
+        if ($cfgType -ieq 'StaticLibrary' -or $cfgType -ieq 'DynamicLibrary') {
+            $projHeadersList = New-Object System.Collections.Generic.List[string]
+            $projSourcesList = New-Object System.Collections.Generic.List[string]
+
+            foreach ($incNode in $xmlDoc.SelectNodes("//*[local-name()='ClInclude']")) {
+                $incVal = $incNode.GetAttribute('Include')
+                if ([string]::IsNullOrWhiteSpace($incVal)) { continue }
+                $resolvedH = Expand-MsBuildPath -RawPath $incVal -ProjectDir $projDir -ProductDir $productDir
+                if ((Test-Path -LiteralPath $resolvedH -PathType Leaf) -and -not $projHeadersList.Contains($resolvedH)) {
+                    $projHeadersList.Add($resolvedH)
+                }
+            }
+            foreach ($srcNode in $xmlDoc.SelectNodes("//*[local-name()='ClCompile']")) {
+                $srcVal = $srcNode.GetAttribute('Include')
+                if ([string]::IsNullOrWhiteSpace($srcVal)) { continue }
+                $resolvedS = Expand-MsBuildPath -RawPath $srcVal -ProjectDir $projDir -ProductDir $productDir
+                if ((Test-Path -LiteralPath $resolvedS -PathType Leaf) -and -not $projSourcesList.Contains($resolvedS)) {
+                    $projSourcesList.Add($resolvedS)
+                }
+            }
+
+            $targetNameNode = $xmlDoc.SelectSingleNode("//*[local-name()='TargetName']")
+            $projNameNode   = $xmlDoc.SelectSingleNode("//*[local-name()='ProjectName']")
+            $stems = @($vcx.BaseName)
+            if ($null -ne $targetNameNode -and -not [string]::IsNullOrWhiteSpace($targetNameNode.InnerText)) {
+                $stems += $targetNameNode.InnerText.Trim()
+            }
+            if ($null -ne $projNameNode -and -not [string]::IsNullOrWhiteSpace($projNameNode.InnerText)) {
+                $stems += $projNameNode.InnerText.Trim()
+            }
+            foreach ($st in ($stems | Select-Object -Unique)) {
+                $projectCodeFilesByStem[$st] = [PSCustomObject]@{
+                    Headers = $projHeadersList.ToArray()
+                    Sources = $projSourcesList.ToArray()
+                }
+            }
+        }
 
         # AdditionalIncludeDirectories
         $incNodes = $xmlDoc.SelectNodes("//*[local-name()='AdditionalIncludeDirectories']")
@@ -1093,7 +1288,7 @@ foreach ($prodDirItem in $productDirs) {
     }
 
     # --------------------------------------------------------------------------
-    # 4. ヘッダファイル候補プールの構築
+    # 4. ヘッダ／ソースファイル候補プールの構築
     # --------------------------------------------------------------------------
     $includeDirHeaders = New-Object System.Collections.Generic.List[string]
     foreach ($incDir in $includeDirs) {
@@ -1108,6 +1303,9 @@ foreach ($prodDirItem in $productDirs) {
     $allProductHeaders = @($productFiles |
         Where-Object { $_.Extension -imatch '^\.h(?:pp|xx)?$' } |
         ForEach-Object { $_.FullName })
+    $allProductSources = @($productFiles |
+        Where-Object { $_.Extension -imatch '^\.c(?:pp|xx|c)?$' } |
+        ForEach-Object { $_.FullName })
 
     # --------------------------------------------------------------------------
     # 5. 各依存ライブラリのバージョン抽出（優先順位厳守）
@@ -1115,14 +1313,22 @@ foreach ($prodDirItem in $productDirs) {
     # --------------------------------------------------------------------------
     $sortedDeps = $depMap.Values | Sort-Object FileType, FileName
     foreach ($dep in $sortedDeps) {
-        $candidateHeaders = @(Find-AssociatedHeaders `
+        $assocFiles = Find-AssociatedCodeFiles `
             -DepFileName $dep.FileName `
             -DepFullPath $dep.FullPath `
+            -ProductDir $productDir `
             -TlogHeaders $tlogHeaders.ToArray() `
             -IncludeDirHeaders $includeDirHeaders.ToArray() `
-            -AllProductHeaders $allProductHeaders)
+            -AllProductHeaders $allProductHeaders `
+            -AllProductSources $allProductSources `
+            -ProjectCodeFilesByStem $projectCodeFilesByStem
+
+        $candidateHeaders   = @($assocFiles.Headers)
+        $candidateSources   = @($assocFiles.Sources)
+        $candidateCodeFiles = @($candidateHeaders + $candidateSources)
 
         $primaryHeader = if ($candidateHeaders.Count -gt 0) { $candidateHeaders[0] } else { '' }
+        $primarySource = if ($candidateSources.Count -gt 0) { $candidateSources[0] } else { '' }
         $verResult     = $null
 
         # [優先順位 1] バイナリ情報 (.dll)
@@ -1134,25 +1340,37 @@ foreach ($prodDirItem in $productDirs) {
         if ($null -eq $verResult) {
             $pathsToCheck = New-Object System.Collections.Generic.List[string]
             if (-not [string]::IsNullOrWhiteSpace($dep.FullPath)) { $pathsToCheck.Add($dep.FullPath) }
-            foreach ($ch in $candidateHeaders) { $pathsToCheck.Add($ch) }
+            foreach ($cf in $candidateCodeFiles) { $pathsToCheck.Add($cf) }
             if ($pathsToCheck.Count -gt 0) {
                 $verResult = Get-FolderVersion -TargetPaths $pathsToCheck.ToArray() -ProductDir $productDir -RootDir $rootFull
             }
         }
 
-        # [優先順位 3] #define (.h ファイル群を優先順に探索)
-        if ($null -eq $verResult -and $candidateHeaders.Count -gt 0) {
-            foreach ($ch in $candidateHeaders) {
-                $verResult = Get-HeaderDefineVersion -HeaderPath $ch
-                if ($null -ne $verResult) { break }
+        # [優先順位 3] #define (ヘッダ・ソース全体から抽出し最新を採用)
+        if ($null -eq $verResult -and $candidateCodeFiles.Count -gt 0) {
+            $defineCandidates = New-Object System.Collections.Generic.List[object]
+            foreach ($cf in $candidateCodeFiles) {
+                $defVer = Get-CodeDefineVersion -FilePath $cf
+                if ($null -ne $defVer) {
+                    $defineCandidates.Add($defVer)
+                }
+            }
+            if ($defineCandidates.Count -gt 0) {
+                $verResult = Select-LatestVersionResult -Candidates $defineCandidates.ToArray()
             }
         }
 
-        # [優先順位 4] 改訂履歴コメント (.h ファイル群を優先順に探索)
-        if ($null -eq $verResult -and $candidateHeaders.Count -gt 0) {
-            foreach ($ch in $candidateHeaders) {
-                $verResult = Get-HeaderHistoryVersion -HeaderPath $ch
-                if ($null -ne $verResult) { break }
+        # [優先順位 4] 改訂履歴コメント (ヘッダ・ソース全体を検索し最新バージョンを採用)
+        if ($null -eq $verResult -and $candidateCodeFiles.Count -gt 0) {
+            $historyCandidates = New-Object System.Collections.Generic.List[object]
+            foreach ($cf in $candidateCodeFiles) {
+                $histVer = Get-CodeHistoryVersion -FilePath $cf
+                if ($null -ne $histVer) {
+                    $historyCandidates.Add($histVer)
+                }
+            }
+            if ($historyCandidates.Count -gt 0) {
+                $verResult = Select-LatestVersionResult -Candidates $historyCandidates.ToArray()
             }
         }
 
@@ -1167,7 +1385,7 @@ foreach ($prodDirItem in $productDirs) {
                     Version       = $lastWriteStr
                     VersionSource = '更新日時'
                     Status        = 'OK'
-                    HeaderPath    = $primaryHeader
+                    SourceFile    = $primaryHeader
                     Notes         = 'バージョン記載なしのためファイル更新日時へフォールバック'
                 }
             }
@@ -1176,16 +1394,26 @@ foreach ($prodDirItem in $productDirs) {
                     Version       = '不明(ファイル未検出)'
                     VersionSource = '未検出'
                     Status        = '要目視確認'
-                    HeaderPath    = $primaryHeader
+                    SourceFile    = $primaryHeader
                     Notes         = '実ファイルおよびヘッダが見つかりません'
                 }
             }
         }
 
-        $usedHeaderPath = if ($verResult.PSObject.Properties['HeaderPath'] -and -not [string]::IsNullOrWhiteSpace($verResult.HeaderPath)) {
-            $verResult.HeaderPath
+        $usedFilePath = if ($verResult.PSObject.Properties['SourceFile'] -and -not [string]::IsNullOrWhiteSpace($verResult.SourceFile)) {
+            $verResult.SourceFile
+        } else {
+            ''
+        }
+        $usedHeaderPath = if (-not [string]::IsNullOrWhiteSpace($usedFilePath) -and $usedFilePath -imatch '\.h(?:pp|xx)?$') {
+            $usedFilePath
         } else {
             $primaryHeader
+        }
+        $usedSourcePath = if (-not [string]::IsNullOrWhiteSpace($usedFilePath) -and $usedFilePath -imatch '\.c(?:pp|xx|c)?$') {
+            $usedFilePath
+        } else {
+            $primarySource
         }
 
         $relFilePath = if (-not [string]::IsNullOrWhiteSpace($dep.FullPath)) {
@@ -1194,6 +1422,10 @@ foreach ($prodDirItem in $productDirs) {
 
         $relHeaderPath = if (-not [string]::IsNullOrWhiteSpace($usedHeaderPath)) {
             Get-NormalizedRelativePath -BasePath $rootFull -TargetPath $usedHeaderPath
+        } else { '' }
+
+        $relSourcePath = if (-not [string]::IsNullOrWhiteSpace($usedSourcePath)) {
+            Get-NormalizedRelativePath -BasePath $rootFull -TargetPath $usedSourcePath
         } else { '' }
 
         $projDisplay = if ($dep.Projects.Count -gt 0) {
@@ -1212,6 +1444,7 @@ foreach ($prodDirItem in $productDirs) {
             Status          = $verResult.Status
             DetectedSources = ($dep.Sources -join '; ')
             HeaderFile      = $relHeaderPath
+            SourceFile      = $relSourcePath
             FilePath        = $relFilePath
             LastWriteTime   = $lastWriteStr
             Notes           = $verResult.Notes
